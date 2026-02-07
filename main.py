@@ -55,9 +55,9 @@ def print_judge(judge_output) -> None:
 
 def main() -> None:
     """Run a demo of the Society of Mind architecture."""
-    parser = argparse.ArgumentParser(description="Minsky Society of Mind Demo")
-    parser.add_argument("--use-models", action="store_true", help="Use RWKV + T5 models")
-    parser.add_argument("--use-rwkv", action="store_true", help="Use RWKV only (no T5 edit)")
+    parser = argparse.ArgumentParser(description="Minsky Society of Mind")
+    parser.add_argument("--no-llm", action="store_true", help="Run in stub mode (no RWKV)")
+    parser.add_argument("--use-t5", action="store_true", help="Also use T5 edit model")
     parser.add_argument("--rwkv-path", type=str, default=None, help="Path to RWKV model")
     parser.add_argument("--max-steps", type=int, default=5, help="Maximum global steps")
     parser.add_argument("--summarizer-interval", type=int, default=10, help="Run summarizers every N steps")
@@ -87,40 +87,34 @@ def main() -> None:
         on_judge=print_judge,
     )
 
-    if args.use_models or args.use_rwkv:
-        print("\nLoading models...")
+    if args.no_llm:
+        print("\nRunning in stub mode (no LLM). Remove --no-llm to use RWKV.")
+    else:
+        print("\nLoading RWKV model...")
 
         # Initialize RWKV
+        from minsky.llm_client import RWKVConfig
+        config = RWKVConfig()
         if args.rwkv_path:
-            from minsky.llm_client import RWKVConfig
-            config = RWKVConfig(model_path=args.rwkv_path)
-            orchestrator.batched_llm.initialize(config)
-        else:
-            orchestrator.batched_llm.initialize()
-
+            config.model_path = args.rwkv_path
+        orchestrator.batched_llm.initialize(config)
         orchestrator.use_llm = True
 
-        # Initialize T5 if using full model stack
-        if args.use_models:
+        # Initialize T5 if requested
+        if args.use_t5:
             orchestrator.batched_edit.initialize()
             orchestrator.use_edit = True
-            orchestrator.use_summarizers = True
-            if not args.no_judges:
-                orchestrator.use_judges = True
             print("Models loaded: RWKV (GPU 0) + T5 (GPU 1)")
-            print(f"Summarizers enabled (every {args.summarizer_interval} steps)")
-            if orchestrator.use_judges:
-                print(f"Judges enabled (every {args.judge_interval} steps)")
         else:
-            orchestrator.use_summarizers = True
-            if not args.no_judges:
-                orchestrator.use_judges = True
-            print("Models loaded: RWKV only (GPU 0)")
-            print(f"Summarizers enabled (every {args.summarizer_interval} steps)")
-            if orchestrator.use_judges:
-                print(f"Judges enabled (every {args.judge_interval} steps)")
-    else:
-        print("\nRunning in stub mode (no models). Use --use-models or --use-rwkv to enable.")
+            print("Model loaded: RWKV (GPU 0)")
+
+        orchestrator.use_summarizers = True
+        if not args.no_judges:
+            orchestrator.use_judges = True
+
+        print(f"Summarizers enabled (every {args.summarizer_interval} steps)")
+        if orchestrator.use_judges:
+            print(f"Judges enabled (every {args.judge_interval} steps)")
 
     # Run with a sample input
     if args.prompt:

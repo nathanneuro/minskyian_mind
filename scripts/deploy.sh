@@ -43,8 +43,11 @@ echo "Next steps on server:"
 echo "  ssh $SERVER"
 echo "  cd $REMOTE_DIR"
 echo "  uv sync"
+echo "  ./scripts/launch_experiment.sh"
+echo ""
+echo "Or manually:"
 echo "  uv run python scripts/download_model.py --model g1d-7.2b"
-echo "  uv run python main.py --use-rwkv"
+echo "  uv run python main.py"
 
 
 
