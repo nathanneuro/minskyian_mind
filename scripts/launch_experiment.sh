@@ -16,7 +16,7 @@ TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 LOGFILE="logs/experiment_${TIMESTAMP}.log"
 
 # Check if RWKV model exists, download both models if needed
-MODEL_DIR="models"
+MODEL_DIR="data/models"
 if ! ls "$MODEL_DIR"/*.pth 1> /dev/null 2>&1; then
     echo ""
     echo "Downloading models (RWKV 7.2B + T5Gemma)..."

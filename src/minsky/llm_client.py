@@ -28,8 +28,9 @@ from rwkv.model import RWKV
 from rwkv.utils import PIPELINE
 
 # Default paths
-MODELS_DIR = Path(__file__).parent.parent.parent / "models"
-STATE_DIR = Path(__file__).parent.parent.parent / "data" / "state"
+DATA_DIR = Path(__file__).parent.parent.parent / "data"
+MODELS_DIR = DATA_DIR / "models"
+STATE_DIR = DATA_DIR / "state"
 
 
 @dataclass

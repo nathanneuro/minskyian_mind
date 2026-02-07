@@ -29,11 +29,16 @@ USED_TRAIN_DATA_DIR = DATA_DIR / "used_train_data"  # After training, moved here
 CHECKPOINTS_DIR = DATA_DIR / "checkpoints"  # T5 model checkpoints
 
 
+# Local T5 model path
+T5_LOCAL_PATH = DATA_DIR / "models" / "t5gemma"
+T5_HF_MODEL = "google/t5gemma-2-270m-270m"
+
+
 @dataclass
 class EditModelConfig:
     """Configuration for the T5Gemma edit model."""
 
-    model_name: str = "google/t5gemma-2-270m-270m"
+    model_path: str = ""  # Local path or HF model name
     device: str = "cuda:1"  # GPU 1 for T5 inference + training
     dtype: torch.dtype = torch.bfloat16
     max_input_length: int = 512
@@ -62,10 +67,18 @@ class EditModel:
 
         from transformers import AutoProcessor, AutoModelForSeq2SeqLM
 
-        print(f"Loading edit model: {self.config.model_name} on {self.config.device}")
-        self.processor = AutoProcessor.from_pretrained(self.config.model_name)
+        # Determine model path: local first, then HuggingFace
+        if self.config.model_path:
+            model_path = self.config.model_path
+        elif T5_LOCAL_PATH.exists():
+            model_path = str(T5_LOCAL_PATH)
+        else:
+            model_path = T5_HF_MODEL
+
+        print(f"Loading edit model: {model_path} on {self.config.device}")
+        self.processor = AutoProcessor.from_pretrained(model_path)
         self.model = AutoModelForSeq2SeqLM.from_pretrained(
-            self.config.model_name,
+            model_path,
             torch_dtype=self.config.dtype,
         ).to(self.config.device)
         self._initialized = True

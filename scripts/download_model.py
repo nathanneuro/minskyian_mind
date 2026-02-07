@@ -68,7 +68,7 @@ MODELS = {
 }
 
 DEFAULT_MODEL = "g1d-7.2b"  # Best quality that fits on 4090 (24GB VRAM)
-MODELS_DIR = Path(__file__).parent.parent / "models"
+MODELS_DIR = Path(__file__).parent.parent / "data" / "models"
 
 
 def download_model(model_key: str = DEFAULT_MODEL) -> Path:
@@ -103,23 +103,32 @@ def download_model(model_key: str = DEFAULT_MODEL) -> Path:
     return Path(model_path)
 
 
-def download_t5() -> None:
-    """Download T5Gemma edit model."""
+def download_t5() -> Path:
+    """Download T5Gemma edit model to data/models/t5gemma/."""
+    t5_path = MODELS_DIR / "t5gemma"
+
     print(f"\nDownloading T5Gemma edit model: {T5_MODEL}")
-    print("This will be cached by transformers...")
+    print(f"Saving to: {t5_path}")
 
     from transformers import AutoProcessor, AutoModelForSeq2SeqLM
     import torch
 
-    # Download processor and model (caches automatically)
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Download and save to local path
     processor = AutoProcessor.from_pretrained(T5_MODEL)
     model = AutoModelForSeq2SeqLM.from_pretrained(
         T5_MODEL,
         torch_dtype=torch.bfloat16,
     )
 
-    print(f"T5Gemma downloaded and cached.")
+    # Save locally
+    processor.save_pretrained(t5_path)
+    model.save_pretrained(t5_path)
+
+    print(f"T5Gemma saved to {t5_path}")
     del model, processor  # Free memory
+    return t5_path
 
 
 def main():
