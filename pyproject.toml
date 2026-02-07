@@ -1,0 +1,21 @@
+[project]
+name = "minsky-rwkv-t5"
+version = "0.1.0"
+description = "Society of Mind architecture with frozen LLMs and learnable T5 edit models"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "torch",
+    "numpy",
+    "transformers",
+    "fastapi",
+    "uvicorn",
+    "websockets",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
