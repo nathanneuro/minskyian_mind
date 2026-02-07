@@ -5,6 +5,9 @@ from enum import Enum
 from typing import Any
 from datetime import datetime
 
+# Message length constraint (~256 chars ≈ 64 tokens)
+MESSAGE_MAX_LENGTH = 256
+
 
 class RoomType(Enum):
     SENSORY = "sensory"
@@ -35,9 +38,20 @@ class MessageType(Enum):
     CYCLE_END = "cycle_end"
 
 
+def truncate_message(content: str, max_length: int = MESSAGE_MAX_LENGTH) -> str:
+    """Truncate message content to max length, adding ellipsis if needed."""
+    if len(content) <= max_length:
+        return content
+    return content[:max_length - 3] + "..."
+
+
 @dataclass
 class Message:
-    """A message passed between rooms in the Society of Mind."""
+    """A message passed between rooms in the Society of Mind.
+
+    Content is limited to MESSAGE_MAX_LENGTH characters (~256 chars ≈ 64 tokens).
+    Each room outputs one message per target per global step.
+    """
 
     content: str
     source: RoomType
@@ -46,6 +60,10 @@ class Message:
     cycle: int = 0
     timestamp: datetime = field(default_factory=datetime.now)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        """Enforce message length limit."""
+        self.content = truncate_message(self.content)
 
     def __str__(self) -> str:
         return f"[{self.source.value} -> {self.target.value}] ({self.message_type.value}): {self.content[:100]}"
