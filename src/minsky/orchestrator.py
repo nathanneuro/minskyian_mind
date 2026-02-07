@@ -16,14 +16,13 @@ from minsky.edit_model import TrainingPair, save_training_pairs
 
 @dataclass
 class BatchedLLM:
-    """Handles batched inference across all rooms.
+    """Handles inference using the official rwkv pip package.
 
-    Instead of calling RWKV once per room, we collect all prompts
-    and run them through RWKV in a single batch for efficiency.
+    Uses CUDAGraph acceleration for fast token generation.
+    Processes prompts sequentially (RWKV doesn't batch well due to state).
     """
 
-    model: Any = None
-    tokenizer: Any = None
+    client: Any = None
     config: Any = None
     _initialized: bool = False
 
@@ -32,43 +31,36 @@ class BatchedLLM:
         if self._initialized:
             return
 
-        import sys
-        from pathlib import Path
+        from minsky.llm_client import RWKVClient, RWKVConfig
 
-        # Add Albatross to path
-        ALBATROSS_PATH = Path(__file__).parent.parent.parent / "subrepos" / "Albatross"
-        sys.path.insert(0, str(ALBATROSS_PATH))
+        rwkv_config = RWKVConfig()
+        if config and hasattr(config, 'model_path'):
+            rwkv_config.model_path = config.model_path
+        if config and hasattr(config, 'strategy'):
+            rwkv_config.strategy = config.strategy
 
-        from reference.rwkv7 import RWKV_x070
-        from reference.utils import TRIE_TOKENIZER
-
-        import types
-        args = types.SimpleNamespace()
-        args.vocab_size = 65536
-        args.head_size = 64
-        args.MODEL_NAME = config.model_path if config else "/mnt/e/RWKV-Runner/models/rwkv7-g0a-7.2b-20250829-ctx4096"
-
-        print(f"Loading batched RWKV: {args.MODEL_NAME}")
-        self.model = RWKV_x070(args)
-        self.tokenizer = TRIE_TOKENIZER(str(ALBATROSS_PATH / "reference" / "rwkv_vocab_v20230424.txt"))
+        self.client = RWKVClient(config=rwkv_config)
+        self.client.initialize()
         self.config = config
         self._initialized = True
-        print("Batched RWKV loaded.")
 
     def generate_batch(
         self,
         prompts: list[str],
         max_tokens: int = 256,
-        temperature: float = 0.7,
-        noise: float = 0.5,
+        temperature: float = 1.0,
+        noise: float = 0.0,  # Not used, kept for API compatibility
     ) -> list[str]:
-        """Generate responses for multiple prompts in parallel.
+        """Generate responses for multiple prompts.
+
+        Note: RWKV processes sequentially due to stateful nature.
+        CUDAGraph acceleration makes each generation fast.
 
         Args:
             prompts: List of prompts to process.
             max_tokens: Max tokens per response.
             temperature: Sampling temperature.
-            noise: Sampling noise.
+            noise: Ignored (kept for API compatibility).
 
         Returns:
             List of generated responses (same order as prompts).
@@ -79,56 +71,15 @@ class BatchedLLM:
         if not prompts:
             return []
 
-        from reference.utils import sampler_simple_batch
-
-        batch_size = len(prompts)
-        state = self.model.generate_zero_state(batch_size)
-
-        # Encode all prompts
-        encoded = [self.tokenizer.encode(p) for p in prompts]
-        out = self.model.forward_batch(encoded, state)
-
-        # Generate tokens
-        all_tokens = [[] for _ in range(batch_size)]
-        stop_tokens = ["\n\n", "User:", "Human:", "---"]
-
-        for _ in range(max_tokens):
-            tokens = sampler_simple_batch(out, noise=noise, temp=temperature)
-            token_list = tokens.tolist()
-
-            # Append tokens
-            for i in range(batch_size):
-                all_tokens[i].extend(token_list[i])
-
-            # Check for stop conditions
-            all_stopped = True
-            for i in range(batch_size):
-                try:
-                    text = self.tokenizer.decode(all_tokens[i], utf8_errors="ignore")
-                    if not any(stop in text for stop in stop_tokens):
-                        all_stopped = False
-                except:
-                    all_stopped = False
-
-            if all_stopped:
-                break
-
-            # Forward pass
-            out = self.model.forward_batch(token_list, state)
-
-        # Decode all outputs
         results = []
-        for i in range(batch_size):
-            try:
-                text = self.tokenizer.decode(all_tokens[i], utf8_errors="ignore")
-                # Trim at stop token
-                for stop in stop_tokens:
-                    if stop in text:
-                        text = text.split(stop)[0]
-                        break
-                results.append(text.strip())
-            except:
-                results.append("[decode error]")
+        for prompt in prompts:
+            response = self.client.generate(
+                prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=0.0,  # Greedy by default
+            )
+            results.append(response)
 
         return results
 

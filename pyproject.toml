@@ -13,6 +13,8 @@ dependencies = [
     "websockets",
     "httpx",
     "python-dotenv",
+    "rwkv>=0.8.31",
+    "huggingface-hub",
 ]
 
 [tool.setuptools.packages.find]

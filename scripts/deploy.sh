@@ -4,7 +4,7 @@
 
 # Configuration
 SERVER="nathan@nathan-lambda.taila16957.ts.net"
-REMOTE_DIR="/media/external-drive/PROJECTNAME"
+REMOTE_DIR="/media/external-drive/minsky"
 LOCAL_DIR="."
 
 # Colors for output
@@ -30,7 +30,21 @@ rsync -avz --progress \
     --exclude='*.pt' \
     --exclude='brain_map/' \
     --exclude='logs/' \
+    --exclude='data/' \
+    --exclude='outputs/' \
+    --exclude='models/' \
+    --exclude='uv.lock' \
+    --exclude='subrepos/' \
     $LOCAL_DIR/ $SERVER:$REMOTE_DIR/
+
+echo -e "${GREEN}Deployment complete!${NC}"
+echo ""
+echo "Next steps on server:"
+echo "  ssh $SERVER"
+echo "  cd $REMOTE_DIR"
+echo "  uv sync"
+echo "  uv run python scripts/download_model.py --model g1d-7.2b"
+echo "  uv run python main.py --use-rwkv"
 
 
 

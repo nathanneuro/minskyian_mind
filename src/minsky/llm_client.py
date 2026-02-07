@@ -1,88 +1,133 @@
 """RWKV client for the Society of Mind architecture.
 
-Wraps the Albatross RWKV inference engine for use in rooms.
+Uses the official rwkv pip package (v0.8.31+) with CUDAGraph acceleration.
 Each room can have its own RWKV state, allowing for parallel "thinking".
 """
 
-import sys
-from pathlib import Path
+import os
 from dataclasses import dataclass, field
 from typing import Any
+from pathlib import Path
 
 import torch
+import numpy as np
 
-# Add Albatross to path
-ALBATROSS_PATH = Path(__file__).parent.parent.parent / "subrepos" / "Albatross"
-sys.path.insert(0, str(ALBATROSS_PATH))
+# Set RWKV environment before importing
+os.environ["RWKV_V7_ON"] = "1"
+os.environ["RWKV_JIT_ON"] = "1"
+os.environ["RWKV_CUDA_ON"] = "1"
 
-from reference.rwkv7 import RWKV_x070
-from reference.utils import TRIE_TOKENIZER, sampler_simple_batch
+from rwkv.model import RWKV
+from rwkv.utils import PIPELINE
+
+# Default model path
+MODELS_DIR = Path(__file__).parent.parent.parent / "models"
 
 
 @dataclass
 class RWKVConfig:
     """Configuration for RWKV model."""
 
-    model_path: str = "/mnt/e/RWKV-Runner/models/rwkv7-g0a-7.2b-20250829-ctx4096"
-    vocab_size: int = 65536
-    head_size: int = 64
-    device: str = "cuda:0"  # GPU 0 for RWKV inference
-    dtype: torch.dtype = torch.float16
+    model_path: str = ""  # Set by download_model.py
+    strategy: str = "cuda fp16"  # or "cuda fp16 *20+" for offloading
+    device: str = "cuda:0"
 
 
 @dataclass
 class RWKVClient:
-    """Client for RWKV inference with state management.
+    """Client for RWKV inference with CUDAGraph acceleration.
 
-    Each client maintains its own state, allowing multiple "agents"
-    to have independent conversation contexts.
+    Uses the official rwkv pip package for fast inference.
     """
 
     config: RWKVConfig = field(default_factory=RWKVConfig)
     model: Any = None
-    tokenizer: Any = None
-    state: Any = None
+    pipeline: Any = None
     _initialized: bool = False
 
+    # CUDAGraph components for fast inference
+    _use_cudagraph: bool = True
+    _cudagraph: Any = None
+    _static_input: Any = None
+    _static_state_in: list = field(default_factory=list)
+    _static_state_out: list = field(default_factory=list)
+    _static_output: Any = None
+
     def initialize(self) -> None:
-        """Load model and tokenizer."""
+        """Load model and set up CUDAGraph."""
         if self._initialized:
             return
 
-        import types
-        args = types.SimpleNamespace()
-        args.vocab_size = self.config.vocab_size
-        args.head_size = self.config.head_size
-        args.MODEL_NAME = self.config.model_path
+        if not self.config.model_path:
+            # Try to find a model in models dir
+            if MODELS_DIR.exists():
+                pth_files = list(MODELS_DIR.glob("*.pth"))
+                if pth_files:
+                    self.config.model_path = str(pth_files[0])
+                    print(f"Found model: {self.config.model_path}")
+
+        if not self.config.model_path:
+            raise ValueError(
+                "No model path specified. Run: uv run python scripts/download_model.py"
+            )
 
         print(f"Loading RWKV model: {self.config.model_path}")
-        self.model = RWKV_x070(args)
-        self.tokenizer = TRIE_TOKENIZER(str(ALBATROSS_PATH / "reference" / "rwkv_vocab_v20230424.txt"))
-        self.state = self.model.generate_zero_state(1)  # batch size 1
+        print(f"Strategy: {self.config.strategy}")
+
+        self.model = RWKV(
+            model=self.config.model_path,
+            strategy=self.config.strategy,
+        )
+        self.pipeline = PIPELINE(self.model, "rwkv_vocab_v20230424")
+
+        # Set up CUDAGraph for fast inference
+        if self._use_cudagraph:
+            self._setup_cudagraph()
+
         self._initialized = True
         print("RWKV model loaded.")
 
-    def reset_state(self) -> None:
-        """Reset the conversation state."""
-        if self.model:
-            self.state = self.model.generate_zero_state(1)
+    def _setup_cudagraph(self) -> None:
+        """Set up CUDAGraph for accelerated inference."""
+        state = self.model.generate_zero_state()
+
+        self._static_input = torch.empty(
+            (self.model.n_embd,), device="cuda", dtype=torch.half
+        )
+        self._static_state_in = [
+            torch.empty_like(x, device="cuda") for x in state
+        ]
+        self._static_state_out = [
+            torch.empty_like(x, device="cuda") for x in state
+        ]
+        self._static_output = torch.empty(
+            (self.model.args.vocab_size,), device="cuda", dtype=torch.half
+        )
+
+        self._cudagraph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self._cudagraph):
+            self._static_output, self._static_state_out = self.model.forward_one_alt(
+                self._static_input, self._static_state_in
+            )
+
+        print("CUDAGraph initialized for fast inference.")
 
     def generate(
         self,
         prompt: str,
         max_tokens: int = 256,
-        temperature: float = 0.7,
-        noise: float = 0.5,
+        temperature: float = 1.0,
+        top_p: float = 0.0,
         stop_tokens: list[str] | None = None,
     ) -> str:
-        """Generate text from a prompt.
+        """Generate text using CUDAGraph acceleration.
 
         Args:
             prompt: Input text to continue from.
             max_tokens: Maximum tokens to generate.
-            temperature: Sampling temperature.
-            noise: Noise for sampling.
-            stop_tokens: List of strings to stop generation at.
+            temperature: Sampling temperature (1.0 = neutral).
+            top_p: Nucleus sampling threshold (0.0 = greedy).
+            stop_tokens: Strings that stop generation.
 
         Returns:
             Generated text (excluding the prompt).
@@ -90,150 +135,190 @@ class RWKVClient:
         if not self._initialized:
             self.initialize()
 
-        stop_tokens = stop_tokens or ["\n\n", "User:", "Human:"]
+        stop_tokens = stop_tokens or ["\n\n", "User:", "Human:", "---"]
 
-        # Encode prompt and process through model
-        tokens = self.tokenizer.encode(prompt)
-        out = self.model.forward_batch([tokens], self.state)
+        # Initial forward pass with prompt
+        state = self.model.generate_zero_state()
+        out, state = self.model.forward(self.pipeline.encode(prompt), state)
 
-        generated_tokens = []
-        generated_text = ""
+        if self._use_cudagraph and self._cudagraph:
+            return self._generate_with_cudagraph(
+                out, state, max_tokens, temperature, top_p, stop_tokens
+            )
+        else:
+            return self._generate_slow(
+                out, state, max_tokens, temperature, top_p, stop_tokens
+            )
 
-        for _ in range(max_tokens):
-            # Sample next token
-            token = sampler_simple_batch(out, noise=noise, temp=temperature)
-            token_list = token.tolist()
-            generated_tokens.extend(token_list[0])
+    def _generate_with_cudagraph(
+        self,
+        out: torch.Tensor,
+        state: list,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+        stop_tokens: list[str],
+    ) -> str:
+        """Fast generation using CUDAGraph."""
+        # Copy initial state
+        for i in range(len(state)):
+            self._static_state_in[i].copy_(state[i])
+        self._static_output.copy_(out)
 
-            # Decode to check for stop tokens
+        all_tokens = []
+        out_last = 0
+
+        for i in range(max_tokens):
+            # Sample token
+            token = self.pipeline.sample_logits(
+                self._static_output, temperature=temperature, top_p=top_p
+            )
+            all_tokens.append(token)
+
+            # Check for stop conditions
             try:
-                generated_text = self.tokenizer.decode(generated_tokens, utf8_errors="ignore")
+                text = self.pipeline.decode(all_tokens[out_last:])
+                if "\ufffd" not in text:
+                    out_last = i + 1
+                    for stop in stop_tokens:
+                        if stop in self.pipeline.decode(all_tokens):
+                            full_text = self.pipeline.decode(all_tokens)
+                            return full_text.split(stop)[0].strip()
             except:
                 pass
 
-            # Check stop conditions
-            if any(stop in generated_text for stop in stop_tokens):
-                # Trim to stop token
+            # Fast forward using CUDAGraph
+            self._static_input.copy_(self.model.z["emb.weight"][token])
+            self._cudagraph.replay()
+            for n in range(len(state)):
+                self._static_state_in[n].copy_(self._static_state_out[n])
+
+        try:
+            return self.pipeline.decode(all_tokens).strip()
+        except:
+            return "[decode error]"
+
+    def _generate_slow(
+        self,
+        out: torch.Tensor,
+        state: list,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+        stop_tokens: list[str],
+    ) -> str:
+        """Slower generation without CUDAGraph (fallback)."""
+        all_tokens = []
+
+        for _ in range(max_tokens):
+            token = self.pipeline.sample_logits(
+                out, temperature=temperature, top_p=top_p
+            )
+            all_tokens.append(token)
+
+            try:
+                text = self.pipeline.decode(all_tokens)
                 for stop in stop_tokens:
-                    if stop in generated_text:
-                        generated_text = generated_text.split(stop)[0]
-                        break
-                break
+                    if stop in text:
+                        return text.split(stop)[0].strip()
+            except:
+                pass
 
-            # Check for end of document token
-            if 0 in token_list[0]:
-                break
+            out, state = self.model.forward(token, state)
 
-            # Forward pass for next token
-            out = self.model.forward_batch(token_list, self.state)
+        try:
+            return self.pipeline.decode(all_tokens).strip()
+        except:
+            return "[decode error]"
 
-        return generated_text.strip()
-
-    def chat(self, message: str, system_prompt: str = "") -> str:
-        """Simple chat interface.
+    def chat(
+        self,
+        message: str,
+        system_prompt: str = "",
+        use_thinking: bool = False,
+    ) -> str:
+        """Chat interface with RWKV-7 prompt format.
 
         Args:
-            message: User message.
-            system_prompt: Optional system prompt to prepend.
+            message: User message (will strip trailing whitespace).
+            system_prompt: Optional system prompt.
+            use_thinking: If True, uses <think> prefix for reasoning.
 
         Returns:
             Assistant response.
         """
+        # Strip trailing whitespace (important for RWKV tokenizer)
+        message = message.rstrip()
+
+        # Replace \n\n with \n in user message (RWKV uses \n\n as round separator)
+        message = message.replace("\n\n", "\n")
+
         prompt = ""
         if system_prompt:
-            prompt = f"{system_prompt}\n\n"
-        prompt += f"User: {message}\n\nAssistant:"
+            prompt = f"System: {system_prompt.rstrip()}\n\n"
 
-        response = self.generate(prompt, stop_tokens=["User:", "\n\nUser", "\n\nHuman"])
-        return response
+        prompt += f"User: {message}\n\nA:"
+
+        if use_thinking:
+            prompt += " <think"  # Model will reason first
+        else:
+            prompt += " <think></think"  # Fake think (recommended)
+
+        return self.generate(
+            prompt,
+            temperature=1.0,
+            top_p=0.5,  # Recommended for chat
+            stop_tokens=["User:", "\n\nUser"],
+        )
 
 
-# Singleton for shared model (saves memory when multiple rooms use same model)
-_shared_model: RWKV_x070 | None = None
-_shared_tokenizer: Any = None
+# Singleton for shared model
+_shared_client: RWKVClient | None = None
 
 
-def get_shared_model(config: RWKVConfig | None = None) -> tuple[RWKV_x070, Any]:
-    """Get or create the shared RWKV model.
+def get_shared_client(config: RWKVConfig | None = None) -> RWKVClient:
+    """Get or create the shared RWKV client."""
+    global _shared_client
 
-    Using a shared model saves GPU memory when multiple rooms
-    need RWKV. Each room can still have its own state.
-    """
-    global _shared_model, _shared_tokenizer
+    if _shared_client is None:
+        _shared_client = RWKVClient(config=config or RWKVConfig())
+        _shared_client.initialize()
 
-    if _shared_model is None:
-        config = config or RWKVConfig()
-
-        import types
-        args = types.SimpleNamespace()
-        args.vocab_size = config.vocab_size
-        args.head_size = config.head_size
-        args.MODEL_NAME = config.model_path
-
-        print(f"Loading shared RWKV model: {config.model_path}")
-        _shared_model = RWKV_x070(args)
-        _shared_tokenizer = TRIE_TOKENIZER(str(ALBATROSS_PATH / "reference" / "rwkv_vocab_v20230424.txt"))
-        print("Shared RWKV model loaded.")
-
-    return _shared_model, _shared_tokenizer
+    return _shared_client
 
 
 def create_room_llm(
     room_name: str,
     system_prompt: str,
     config: RWKVConfig | None = None,
+    use_thinking: bool = False,
 ) -> callable:
     """Create an LLM function for a specific room.
 
-    Returns a function that takes a prompt and returns a response,
-    suitable for use as the llm_fn parameter in room processors.
-
-    Args:
-        room_name: Name of the room (for logging).
-        system_prompt: System prompt specific to this room's role.
-        config: Optional RWKV config.
-
-    Returns:
-        A callable that takes str and returns str.
+    Returns a function that takes a prompt and returns a response.
+    Uses RWKV-7 chat format with recommended decoding params.
     """
-    model, tokenizer = get_shared_model(config)
-    state = model.generate_zero_state(1)
+    client = get_shared_client(config)
+
+    # Clean system prompt
+    system_prompt = system_prompt.rstrip().replace("\n\n", "\n")
 
     def llm_fn(prompt: str) -> str:
-        """Generate response for the room."""
-        full_prompt = f"{system_prompt}\n\n{prompt}\n\nResponse:"
+        # Strip and clean prompt
+        prompt = prompt.rstrip().replace("\n\n", "\n")
 
-        tokens = tokenizer.encode(full_prompt)
-        out = model.forward_batch([tokens], state)
+        # Build RWKV-7 format
+        full_prompt = f"System: {system_prompt}\n\nUser: {prompt}\n\nA:"
+        if use_thinking:
+            full_prompt += " <think"
+        else:
+            full_prompt += " <think></think"
 
-        generated_tokens = []
-        max_tokens = 256
-        stop_tokens = ["\n\n", "User:", "---"]
-
-        for _ in range(max_tokens):
-            token = sampler_simple_batch(out, noise=0.5, temp=0.7)
-            token_list = token.tolist()
-            generated_tokens.extend(token_list[0])
-
-            try:
-                text = tokenizer.decode(generated_tokens, utf8_errors="ignore")
-                if any(stop in text for stop in stop_tokens):
-                    for stop in stop_tokens:
-                        if stop in text:
-                            text = text.split(stop)[0]
-                            break
-                    return text.strip()
-            except:
-                pass
-
-            if 0 in token_list[0]:
-                break
-
-            out = model.forward_batch(token_list, state)
-
-        try:
-            return tokenizer.decode(generated_tokens, utf8_errors="ignore").strip()
-        except:
-            return "[generation error]"
+        return client.generate(
+            full_prompt,
+            max_tokens=256,
+            temperature=1.0,
+            top_p=0.5,
+        )
 
     return llm_fn
