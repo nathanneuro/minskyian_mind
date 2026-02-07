@@ -4,6 +4,10 @@ Tools:
 - web_search: Search the web using Exa API
 - scratchpad: Persistent key-value storage for notes
 - python_exec: Sandboxed Python code execution
+- memory_*: Long-term memory with FSRS-6 decay and semantic search
+
+IMPORTANT: Motor executes tools but does NOT see outputs.
+Tool outputs go to Sensory, which perceives them.
 """
 
 import os
@@ -339,6 +343,226 @@ except Exception as e:
 
 
 # =============================================================================
+# Memory System (Vestige-inspired)
+# =============================================================================
+
+from minsky.memory import get_memory_store
+
+
+def memory_store(
+    content: str,
+    tags: str = "",
+    source: str = "",
+) -> ToolResult:
+    """Store content in long-term memory with smart duplicate detection.
+
+    Uses prediction error gating:
+    - Similar content (>92%) just reinforces existing memory
+    - Related content (>75%) updates existing memory
+    - Novel content creates new memory
+
+    Args:
+        content: The information to remember.
+        tags: Comma-separated tags for categorization.
+        source: Source of the information.
+
+    Returns:
+        ToolResult with action taken (CREATE/UPDATE/REINFORCE) and memory ID.
+    """
+    try:
+        store = get_memory_store()
+        tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+
+        action, memory_id = store.smart_ingest(
+            content=content,
+            tags=tag_list,
+            source=source,
+        )
+
+        return ToolResult(
+            success=True,
+            output=f"Memory {action}: {memory_id}\nContent: {content[:100]}...",
+            metadata={"action": action, "memory_id": memory_id},
+        )
+
+    except Exception as e:
+        return ToolResult(
+            success=False,
+            output="",
+            error=f"Memory store failed: {str(e)}",
+        )
+
+
+def memory_query(
+    query: str,
+    limit: int = 5,
+    min_accessibility: float = 0.1,
+) -> ToolResult:
+    """Search long-term memory using hybrid keyword + semantic search.
+
+    Memories decay over time (FSRS-6 power law). Retrieving a memory
+    strengthens it (testing effect).
+
+    Args:
+        query: What to search for.
+        limit: Maximum number of results.
+        min_accessibility: Minimum accessibility threshold (0-1).
+
+    Returns:
+        ToolResult with matching memories and their accessibility scores.
+    """
+    try:
+        store = get_memory_store()
+        results = store.search(
+            query=query,
+            limit=limit,
+            min_accessibility=min_accessibility,
+        )
+
+        if not results:
+            return ToolResult(
+                success=True,
+                output=f"No memories found for: {query}",
+                metadata={"count": 0, "query": query},
+            )
+
+        # Format results
+        lines = [f"Found {len(results)} memories for: {query}\n"]
+        for i, (memory, score) in enumerate(results, 1):
+            state = memory.get_state().value
+            lines.append(
+                f"{i}. [{memory.id}] (state={state}, accessibility={memory.accessibility:.2f})\n"
+                f"   {memory.content[:200]}..."
+            )
+            if memory.tags:
+                lines.append(f"   Tags: {', '.join(memory.tags)}")
+
+        return ToolResult(
+            success=True,
+            output="\n".join(lines),
+            metadata={
+                "count": len(results),
+                "query": query,
+                "memory_ids": [m.id for m, _ in results],
+            },
+        )
+
+    except Exception as e:
+        return ToolResult(
+            success=False,
+            output="",
+            error=f"Memory query failed: {str(e)}",
+        )
+
+
+def memory_promote(memory_id: str) -> ToolResult:
+    """Mark a memory as helpful, strengthening it.
+
+    Increases storage strength and makes it easier to recall.
+
+    Args:
+        memory_id: The ID of the memory to promote.
+
+    Returns:
+        ToolResult indicating success or failure.
+    """
+    try:
+        store = get_memory_store()
+        success = store.promote(memory_id)
+
+        if success:
+            return ToolResult(
+                success=True,
+                output=f"Memory {memory_id} promoted (strengthened)",
+                metadata={"memory_id": memory_id},
+            )
+        else:
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"Memory {memory_id} not found",
+            )
+
+    except Exception as e:
+        return ToolResult(
+            success=False,
+            output="",
+            error=f"Memory promote failed: {str(e)}",
+        )
+
+
+def memory_demote(memory_id: str) -> ToolResult:
+    """Mark a memory as wrong or unhelpful, weakening it.
+
+    Reduces retrieval strength, making it less likely to surface.
+
+    Args:
+        memory_id: The ID of the memory to demote.
+
+    Returns:
+        ToolResult indicating success or failure.
+    """
+    try:
+        store = get_memory_store()
+        success = store.demote(memory_id)
+
+        if success:
+            return ToolResult(
+                success=True,
+                output=f"Memory {memory_id} demoted (weakened)",
+                metadata={"memory_id": memory_id},
+            )
+        else:
+            return ToolResult(
+                success=False,
+                output="",
+                error=f"Memory {memory_id} not found",
+            )
+
+    except Exception as e:
+        return ToolResult(
+            success=False,
+            output="",
+            error=f"Memory demote failed: {str(e)}",
+        )
+
+
+def memory_stats() -> ToolResult:
+    """Get statistics about the memory system.
+
+    Returns counts by state (active/dormant/silent/unavailable)
+    and average accessibility.
+    """
+    try:
+        store = get_memory_store()
+        stats = store.stats()
+
+        lines = [
+            f"Memory Statistics:",
+            f"  Total memories: {stats['total']}",
+        ]
+
+        if stats['total'] > 0:
+            lines.append(f"  Average accessibility: {stats['avg_accessibility']:.2f}")
+            lines.append(f"  By state:")
+            for state, count in stats['by_state'].items():
+                lines.append(f"    {state}: {count}")
+
+        return ToolResult(
+            success=True,
+            output="\n".join(lines),
+            metadata=stats,
+        )
+
+    except Exception as e:
+        return ToolResult(
+            success=False,
+            output="",
+            error=f"Memory stats failed: {str(e)}",
+        )
+
+
+# =============================================================================
 # Tool Registry
 # =============================================================================
 
@@ -362,6 +586,27 @@ TOOLS = {
     "python_exec": {
         "function": python_exec,
         "description": "Execute Python code in a sandbox. Args: code (str). Limited imports, 10s timeout.",
+    },
+    # Memory tools
+    "memory_store": {
+        "function": memory_store,
+        "description": "Store info in long-term memory. Args: content (str), tags (str, optional), source (str, optional). Auto-detects duplicates.",
+    },
+    "memory_query": {
+        "function": memory_query,
+        "description": "Search memory using hybrid keyword+semantic. Args: query (str), limit (int, optional). Retrieval strengthens memories.",
+    },
+    "memory_promote": {
+        "function": memory_promote,
+        "description": "Mark memory as helpful (strengthens it). Args: memory_id (str).",
+    },
+    "memory_demote": {
+        "function": memory_demote,
+        "description": "Mark memory as wrong (weakens it). Args: memory_id (str).",
+    },
+    "memory_stats": {
+        "function": memory_stats,
+        "description": "Get memory system statistics. No args.",
     },
 }
 

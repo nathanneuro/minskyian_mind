@@ -40,9 +40,20 @@ def apply_edit(text: str, edit_fn, context: str = "") -> str:
 # -----------------------------------------------------------------------------
 # Sensory Room
 # -----------------------------------------------------------------------------
-# Receives perceptions from the external world
+# Gets flooded with ALL incoming data (perceptions, tool outputs, actions)
+# Must summarize and decide what to pass to Planning and Motor
 # Responds to attention requests from Planning
-# Observes Motor's actions as context
+
+SENSORY_SYSTEM_PROMPT = """You are the Sensory module of a cognitive system.
+You receive ALL incoming data: perceptions, tool outputs, action observations.
+Your job is to SUMMARIZE what's relevant and pass it along.
+
+You do NOT filter what you receive - everything comes in.
+You DO decide what summaries to pass to:
+- Planning: Needs strategic info for decision-making
+- Motor: Needs context relevant to action execution
+
+Be concise. Extract signal from noise. Highlight what matters."""
 
 
 def sensory_process(
@@ -54,18 +65,25 @@ def sensory_process(
     """
     Process incoming messages in the Sensory room.
 
-    Sensory's goals:
-    - Predict what comes next (world modeling)
-    - Direct attention according to Planning's instructions
-    - Observe Motor's actions as contextual clues
+    Sensory's role:
+    - Gets flooded with ALL data (no input filtering)
+    - Summarizes data for Planning and Motor
+    - Responds to attention requests from Planning
+    - Provides context to Motor for action execution
     """
     outgoing: list[Message] = []
+
+    # Collect all incoming data this cycle
+    perceptions: list[str] = []
+    tool_outputs: list[str] = []
+    motor_actions: list[str] = []
 
     for msg in incoming:
         state.add_message(msg)
 
         if msg.message_type == MessageType.PERCEPTION:
-            # New perception from external world - update context
+            # External perception - accumulate
+            perceptions.append(msg.content)
             state.current_context = msg.content
             state.metadata["last_perception"] = msg.content
 
@@ -75,11 +93,13 @@ def sensory_process(
 
             if llm_fn:
                 response_content = llm_fn(
-                    f"Focus attention on: {attention_target}\n"
+                    f"{SENSORY_SYSTEM_PROMPT}\n\n"
+                    f"---\n\n"
+                    f"Planning requests attention on: {attention_target}\n"
                     f"Current context: {state.current_context}\n"
-                    f"What do you observe?"
+                    f"Recent tool outputs: {state.metadata.get('last_tool_output', 'none')}\n\n"
+                    f"Summarize what you observe about this focus area:"
                 )
-                # Apply edit model
                 response_content = apply_edit(
                     response_content,
                     edit_fn,
@@ -99,23 +119,62 @@ def sensory_process(
             )
 
         elif msg.message_type == MessageType.ACTION:
-            # Motor is taking an action - observe it as context
+            # Motor is taking an action - observe it
+            motor_actions.append(msg.content)
             state.metadata["last_motor_action"] = msg.content
 
         elif msg.message_type == MessageType.TOOL_OUTPUT:
             # Tool output from Motor - Sensory perceives the results
             tool_output = msg.content
+            tool_outputs.append(tool_output)
             state.metadata["last_tool_output"] = tool_output
             state.current_context += f"\n[Tool Result]: {tool_output}"
 
-            # Automatically notify Planning of important tool results
+    # After processing all messages, summarize and forward to Planning
+    if tool_outputs or perceptions:
+        # Summarize accumulated data for Planning
+        all_data = []
+        if perceptions:
+            all_data.append(f"Perceptions: {'; '.join(perceptions)}")
+        if tool_outputs:
+            all_data.append(f"Tool results: {'; '.join(tool_outputs)}")
+        if motor_actions:
+            all_data.append(f"Motor actions: {'; '.join(motor_actions)}")
+
+        combined = "\n".join(all_data)
+
+        if llm_fn:
+            summary = llm_fn(
+                f"{SENSORY_SYSTEM_PROMPT}\n\n"
+                f"---\n\n"
+                f"Incoming data this cycle:\n{combined}\n\n"
+                f"Summarize the key information Planning needs to know:"
+            )
+            summary = apply_edit(summary, edit_fn, context="summarize_for_planning")
+        else:
+            summary = combined[:500]
+
+        # Forward summary to Planning
+        outgoing.append(
+            Message(
+                content=summary,
+                source=RoomType.SENSORY,
+                target=RoomType.PLANNING,
+                message_type=MessageType.PERCEPTION,
+                cycle=incoming[0].cycle if incoming else 0,
+            )
+        )
+
+        # Also provide relevant context to Motor
+        motor_context = state.metadata.get("last_tool_output", "")
+        if motor_context:
             outgoing.append(
                 Message(
-                    content=f"Tool output received: {tool_output[:500]}",
+                    content=f"Context for action: {motor_context[:300]}",
                     source=RoomType.SENSORY,
-                    target=RoomType.PLANNING,
+                    target=RoomType.MOTOR,
                     message_type=MessageType.PERCEPTION,
-                    cycle=msg.cycle,
+                    cycle=incoming[0].cycle if incoming else 0,
                 )
             )
 
@@ -126,9 +185,23 @@ def sensory_process(
 # Planning Room
 # -----------------------------------------------------------------------------
 # No direct contact with the external world
-# Sends attention requests to Sensory
-# Sends high-level commands to Motor
-# Generates hypotheses and plans with expected values
+# Has two "tools":
+#   1. Attention requests -> Sensory (query what to focus on)
+#   2. High-level commands -> Motor (what to do, not how)
+# Motor decides how to implement commands (which tools to use)
+
+PLANNING_SYSTEM_PROMPT = """You are the Planning module of a cognitive system.
+You have NO direct contact with the external world.
+
+Your tools:
+1. ATTENTION: Ask Sensory to focus on something (gather info)
+2. COMMAND: Tell Motor what to accomplish (high-level goal)
+
+Motor decides HOW to implement your commands (which tools to use).
+You just say WHAT you want done.
+
+Generate hypotheses, estimate expected values, pick best action.
+Avoid vacillation - commit to a plan once decided."""
 
 
 def planning_process(
@@ -140,12 +213,13 @@ def planning_process(
     """
     Process incoming messages in the Planning room.
 
-    Planning's goals:
-    - Generate at least two hypotheses to explain the data
-    - Generate at least one plan per hypothesis
-    - Predict expected value of each plan
-    - Send highest EV plan to Motor
-    - Avoid action vacillation/churn
+    Planning's role:
+    - Generate hypotheses to explain sensory data
+    - Estimate expected value of possible actions
+    - Send attention requests to Sensory (queries)
+    - Send high-level commands to Motor (goals, not methods)
+
+    Motor decides HOW to implement the commands.
     """
     outgoing: list[Message] = []
 
@@ -153,46 +227,63 @@ def planning_process(
         state.add_message(msg)
 
         if msg.message_type == MessageType.PERCEPTION:
-            # New perception relayed from Sensory - time to hypothesize
+            # Sensory summary received - time to hypothesize and act
             perception = msg.content
 
             if llm_fn:
-                # Use LLM to generate hypotheses and plan
+                # Use LLM to generate hypotheses and high-level command
                 planning_response = llm_fn(
-                    f"Given this perception: {perception}\n\n"
-                    f"1. Generate at least 2 hypotheses explaining this situation.\n"
-                    f"2. For each hypothesis, generate a plan.\n"
-                    f"3. Estimate the expected value (0-1) of each plan.\n"
-                    f"4. Select the highest EV plan.\n\n"
-                    f"What is your highest EV plan, stated as a clear instruction?"
+                    f"{PLANNING_SYSTEM_PROMPT}\n\n"
+                    f"---\n\n"
+                    f"Sensory reports: {perception}\n\n"
+                    f"1. Generate 2+ hypotheses explaining this situation.\n"
+                    f"2. For each, estimate expected value (0-1) of acting on it.\n"
+                    f"3. Choose the highest EV action.\n\n"
+                    f"Output ONE of:\n"
+                    f"ATTENTION: <what to focus on> (if you need more info)\n"
+                    f"COMMAND: <high-level goal for Motor> (what, not how)"
                 )
-                # Apply edit model
                 planning_response = apply_edit(
                     planning_response,
                     edit_fn,
                     context=f"perception: {perception[:100]}",
                 )
-                # Store hypotheses in metadata for later judge evaluation
                 state.metadata["last_planning_response"] = planning_response
-                plan_content = planning_response
-            else:
-                # Stub: generate a simple plan
-                plan_content = f"[Plan based on perception: {perception[:100]}]"
 
-            # Request more info from Sensory if needed
-            if "need more information" in plan_content.lower() or not state.metadata.get("attention_requested"):
-                outgoing.append(
-                    Message(
-                        content=f"What are the key details about: {perception[:50]}?",
-                        source=RoomType.PLANNING,
-                        target=RoomType.SENSORY,
-                        message_type=MessageType.ATTENTION_REQUEST,
-                        cycle=msg.cycle,
+                # Parse Planning's output
+                if "ATTENTION:" in planning_response.upper():
+                    # Planning wants more information
+                    import re
+                    match = re.search(r'ATTENTION:\s*(.+)', planning_response, re.IGNORECASE | re.DOTALL)
+                    attention_content = match.group(1).strip() if match else perception[:50]
+
+                    outgoing.append(
+                        Message(
+                            content=attention_content,
+                            source=RoomType.PLANNING,
+                            target=RoomType.SENSORY,
+                            message_type=MessageType.ATTENTION_REQUEST,
+                            cycle=msg.cycle,
+                        )
                     )
-                )
-                state.metadata["attention_requested"] = True
+                else:
+                    # Planning wants Motor to act
+                    import re
+                    match = re.search(r'COMMAND:\s*(.+)', planning_response, re.IGNORECASE | re.DOTALL)
+                    command_content = match.group(1).strip() if match else planning_response
+
+                    outgoing.append(
+                        Message(
+                            content=command_content,
+                            source=RoomType.PLANNING,
+                            target=RoomType.MOTOR,
+                            message_type=MessageType.MOTOR_COMMAND,
+                            cycle=msg.cycle,
+                        )
+                    )
             else:
-                # Send plan to Motor
+                # Stub: generate a simple command
+                plan_content = f"[Command based on perception: {perception[:100]}]"
                 outgoing.append(
                     Message(
                         content=plan_content,
@@ -204,28 +295,35 @@ def planning_process(
                 )
 
         elif msg.message_type == MessageType.ATTENTION_RESPONSE:
-            # Sensory responded to our attention request - incorporate and plan
+            # Sensory responded to attention request - now decide action
             sensory_info = msg.content
 
             if llm_fn:
-                plan_content = llm_fn(
-                    f"Additional sensory information: {sensory_info}\n"
+                planning_response = llm_fn(
+                    f"{PLANNING_SYSTEM_PROMPT}\n\n"
+                    f"---\n\n"
+                    f"Attention response from Sensory: {sensory_info}\n"
                     f"Previous context: {state.current_context}\n\n"
-                    f"Generate the highest EV plan as a clear instruction for Motor."
+                    f"Based on this information:\n"
+                    f"COMMAND: <high-level goal for Motor>"
                 )
-                # Apply edit model
-                plan_content = apply_edit(
-                    plan_content,
+                planning_response = apply_edit(
+                    planning_response,
                     edit_fn,
                     context=f"sensory_info: {sensory_info[:100]}",
                 )
-            else:
-                plan_content = f"[Refined plan with sensory info: {sensory_info[:50]}]"
 
-            # Now send to Motor
+                # Extract command
+                import re
+                match = re.search(r'COMMAND:\s*(.+)', planning_response, re.IGNORECASE | re.DOTALL)
+                command_content = match.group(1).strip() if match else planning_response
+            else:
+                command_content = f"[Command based on sensory info: {sensory_info[:50]}]"
+
+            # Send high-level command to Motor
             outgoing.append(
                 Message(
-                    content=plan_content,
+                    content=command_content,
                     source=RoomType.PLANNING,
                     target=RoomType.MOTOR,
                     message_type=MessageType.MOTOR_COMMAND,

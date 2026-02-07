@@ -1,10 +1,15 @@
 """Minsky - A Society of Mind architecture with frozen LLMs and learnable edit models.
 
 Architecture:
-- Three rooms: Sensory, Planning, Motor
+- Three rooms: Sensory (summarizes data), Planning (hypotheses), Motor (actions)
 - Frozen LLM (RWKV 7B on GPU 0) for cognition
 - Learnable T5 edit model (T5Gemma 270M on GPU 1) for adaptation
 - Summarizer agents (RWKV only) every N global steps
+- Memory system (FSRS-6 decay, dual-strength, hybrid search)
+
+Motor has tools: web_search, scratchpad, python_exec, memory_*
+Motor executes tools but does NOT see outputs - those go to Sensory.
+Sensory summarizes all data and forwards to Planning and Motor.
 
 Each global step:
 1. Batch all room prompts through RWKV (GPU 0)
@@ -22,10 +27,16 @@ from minsky.tools import (
     scratchpad_write,
     scratchpad_read,
     python_exec,
+    memory_store,
+    memory_query,
+    memory_promote,
+    memory_demote,
+    memory_stats,
     execute_tool,
     get_tools_description,
     ToolResult,
 )
+from minsky.memory import Memory, MemoryStore, MemoryState, get_memory_store
 
 __all__ = [
     # Types
@@ -50,4 +61,14 @@ __all__ = [
     "EditModel",
     "TrainingPair",
     "EditModelTrainer",
+    # Memory
+    "Memory",
+    "MemoryStore",
+    "MemoryState",
+    "get_memory_store",
+    "memory_store",
+    "memory_query",
+    "memory_promote",
+    "memory_demote",
+    "memory_stats",
 ]
