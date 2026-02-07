@@ -1,10 +1,17 @@
 """RWKV client for the Society of Mind architecture.
 
 Uses the official rwkv pip package (v0.8.31+) with CUDAGraph acceleration.
-Each room can have its own RWKV state, allowing for parallel "thinking".
+
+IMPORTANT: RWKV is stateful - the state represents the model's "memory" of
+everything it has processed. This state must be:
+1. Maintained across generations (not reset each time)
+2. Saved to disk periodically (every N steps)
+3. Saved on shutdown
+4. Loaded when resuming
 """
 
 import os
+import atexit
 from dataclasses import dataclass, field
 from typing import Any
 from pathlib import Path
@@ -20,8 +27,9 @@ os.environ["RWKV_CUDA_ON"] = "1"
 from rwkv.model import RWKV
 from rwkv.utils import PIPELINE
 
-# Default model path
+# Default paths
 MODELS_DIR = Path(__file__).parent.parent.parent / "models"
+STATE_DIR = Path(__file__).parent.parent.parent / "data" / "state"
 
 
 @dataclass
@@ -31,19 +39,29 @@ class RWKVConfig:
     model_path: str = ""  # Set by download_model.py
     strategy: str = "cuda fp16"  # or "cuda fp16 *20+" for offloading
     device: str = "cuda:0"
+    state_save_interval: int = 100  # Save state every N generations
+    state_file: str = "rwkv_state.pt"  # State filename
 
 
 @dataclass
 class RWKVClient:
-    """Client for RWKV inference with CUDAGraph acceleration.
+    """Client for RWKV inference with persistent state.
 
-    Uses the official rwkv pip package for fast inference.
+    RWKV state represents the model's accumulated context/memory.
+    State is:
+    - Maintained across all generations (not reset)
+    - Saved to disk every N steps and on shutdown
+    - Loaded when resuming
     """
 
     config: RWKVConfig = field(default_factory=RWKVConfig)
     model: Any = None
     pipeline: Any = None
     _initialized: bool = False
+
+    # Persistent state
+    state: list = field(default_factory=list)
+    generation_count: int = 0
 
     # CUDAGraph components for fast inference
     _use_cudagraph: bool = True
@@ -54,7 +72,7 @@ class RWKVClient:
     _static_output: Any = None
 
     def initialize(self) -> None:
-        """Load model and set up CUDAGraph."""
+        """Load model, set up CUDAGraph, and restore state if available."""
         if self._initialized:
             return
 
@@ -80,12 +98,67 @@ class RWKVClient:
         )
         self.pipeline = PIPELINE(self.model, "rwkv_vocab_v20230424")
 
+        # Load or initialize state
+        self._load_state()
+
         # Set up CUDAGraph for fast inference
         if self._use_cudagraph:
             self._setup_cudagraph()
 
+        # Register shutdown handler to save state
+        atexit.register(self.save_state)
+
         self._initialized = True
         print("RWKV model loaded.")
+
+    def _get_state_path(self) -> Path:
+        """Get path to state file."""
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        return STATE_DIR / self.config.state_file
+
+    def _load_state(self) -> None:
+        """Load state from disk or initialize fresh."""
+        state_path = self._get_state_path()
+
+        if state_path.exists():
+            try:
+                checkpoint = torch.load(state_path, weights_only=False)
+                self.state = checkpoint["state"]
+                self.generation_count = checkpoint.get("generation_count", 0)
+                print(f"Loaded RWKV state from {state_path}")
+                print(f"  Resuming from generation {self.generation_count}")
+            except Exception as e:
+                print(f"Failed to load state: {e}")
+                print("Starting with fresh state.")
+                self.state = self.model.generate_zero_state()
+                self.generation_count = 0
+        else:
+            print("No saved state found. Starting fresh.")
+            self.state = self.model.generate_zero_state()
+            self.generation_count = 0
+
+    def save_state(self) -> None:
+        """Save state to disk."""
+        if not self._initialized or not self.state:
+            return
+
+        state_path = self._get_state_path()
+        try:
+            # Move state to CPU for saving
+            state_cpu = [s.cpu() if hasattr(s, 'cpu') else s for s in self.state]
+            torch.save({
+                "state": state_cpu,
+                "generation_count": self.generation_count,
+            }, state_path)
+            print(f"Saved RWKV state to {state_path} (gen {self.generation_count})")
+        except Exception as e:
+            print(f"Failed to save state: {e}")
+
+    def reset_state(self) -> None:
+        """Reset state to fresh (loses all context)."""
+        self.state = self.model.generate_zero_state()
+        self.generation_count = 0
+        print("RWKV state reset.")
 
     def _setup_cudagraph(self) -> None:
         """Set up CUDAGraph for accelerated inference."""
@@ -120,7 +193,10 @@ class RWKVClient:
         top_p: float = 0.0,
         stop_tokens: list[str] | None = None,
     ) -> str:
-        """Generate text using CUDAGraph acceleration.
+        """Generate text using persistent state.
+
+        The state accumulates context across all generations.
+        State is saved every N generations (config.state_save_interval).
 
         Args:
             prompt: Input text to continue from.
@@ -137,32 +213,37 @@ class RWKVClient:
 
         stop_tokens = stop_tokens or ["\n\n", "User:", "Human:", "---"]
 
-        # Initial forward pass with prompt
-        state = self.model.generate_zero_state()
-        out, state = self.model.forward(self.pipeline.encode(prompt), state)
+        # Forward pass with prompt using PERSISTENT state
+        out, self.state = self.model.forward(self.pipeline.encode(prompt), self.state)
 
         if self._use_cudagraph and self._cudagraph:
-            return self._generate_with_cudagraph(
-                out, state, max_tokens, temperature, top_p, stop_tokens
+            result = self._generate_with_cudagraph(
+                out, max_tokens, temperature, top_p, stop_tokens
             )
         else:
-            return self._generate_slow(
-                out, state, max_tokens, temperature, top_p, stop_tokens
+            result = self._generate_slow(
+                out, max_tokens, temperature, top_p, stop_tokens
             )
+
+        # Update generation count and save periodically
+        self.generation_count += 1
+        if self.generation_count % self.config.state_save_interval == 0:
+            self.save_state()
+
+        return result
 
     def _generate_with_cudagraph(
         self,
         out: torch.Tensor,
-        state: list,
         max_tokens: int,
         temperature: float,
         top_p: float,
         stop_tokens: list[str],
     ) -> str:
-        """Fast generation using CUDAGraph."""
-        # Copy initial state
-        for i in range(len(state)):
-            self._static_state_in[i].copy_(state[i])
+        """Fast generation using CUDAGraph with persistent state."""
+        # Copy current state to static buffers
+        for i in range(len(self.state)):
+            self._static_state_in[i].copy_(self.state[i])
         self._static_output.copy_(out)
 
         all_tokens = []
@@ -183,6 +264,9 @@ class RWKVClient:
                     for stop in stop_tokens:
                         if stop in self.pipeline.decode(all_tokens):
                             full_text = self.pipeline.decode(all_tokens)
+                            # Update persistent state from static buffers
+                            for n in range(len(self.state)):
+                                self.state[n].copy_(self._static_state_in[n])
                             return full_text.split(stop)[0].strip()
             except:
                 pass
@@ -190,8 +274,12 @@ class RWKVClient:
             # Fast forward using CUDAGraph
             self._static_input.copy_(self.model.z["emb.weight"][token])
             self._cudagraph.replay()
-            for n in range(len(state)):
+            for n in range(len(self.state)):
                 self._static_state_in[n].copy_(self._static_state_out[n])
+
+        # Update persistent state from static buffers
+        for n in range(len(self.state)):
+            self.state[n].copy_(self._static_state_in[n])
 
         try:
             return self.pipeline.decode(all_tokens).strip()
@@ -201,13 +289,12 @@ class RWKVClient:
     def _generate_slow(
         self,
         out: torch.Tensor,
-        state: list,
         max_tokens: int,
         temperature: float,
         top_p: float,
         stop_tokens: list[str],
     ) -> str:
-        """Slower generation without CUDAGraph (fallback)."""
+        """Slower generation without CUDAGraph (fallback), updates persistent state."""
         all_tokens = []
 
         for _ in range(max_tokens):
@@ -224,7 +311,8 @@ class RWKVClient:
             except:
                 pass
 
-            out, state = self.model.forward(token, state)
+            # Update persistent state
+            out, self.state = self.model.forward(token, self.state)
 
         try:
             return self.pipeline.decode(all_tokens).strip()
