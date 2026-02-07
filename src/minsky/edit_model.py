@@ -26,6 +26,7 @@ import torch
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
 TRAIN_DATA_DIR = DATA_DIR / "train_data"  # New training pairs go here
 USED_TRAIN_DATA_DIR = DATA_DIR / "used_train_data"  # After training, moved here
+CHECKPOINTS_DIR = DATA_DIR / "checkpoints"  # T5 model checkpoints
 
 
 @dataclass
@@ -329,11 +330,14 @@ class EditModelTrainer:
 
         return loss.item()
 
-    def train_on_file(self, filepath: Path) -> list[float]:
+    def train_on_file(self, filepath: Path, save_checkpoint: bool = True) -> list[float]:
         """Train on all pairs in a single file, then move it to used_train_data.
+
+        Automatically saves checkpoint after training (with rotation).
 
         Args:
             filepath: Path to the training file.
+            save_checkpoint: Whether to save checkpoint after training.
 
         Returns:
             List of losses from each batch.
@@ -352,6 +356,10 @@ class EditModelTrainer:
         # Move file to used_train_data
         dest = USED_TRAIN_DATA_DIR / filepath.name
         filepath.rename(dest)
+
+        # Save checkpoint (rotates previous)
+        if save_checkpoint and losses:
+            self.save_checkpoint("latest")
 
         return losses
 
@@ -378,25 +386,108 @@ class EditModelTrainer:
             "remaining_pairs": len(self.training_pairs),
         }
 
-    def save_checkpoint(self, path: str) -> None:
-        """Save model checkpoint."""
-        if self.model._initialized:
-            self.model.model.save_pretrained(path)
-            self.model.processor.save_pretrained(path)
-            print(f"Saved checkpoint to {path}")
+    def save_checkpoint(self, name: str = "latest") -> Path:
+        """Save model checkpoint, keeping latest and previous.
 
-    def load_checkpoint(self, path: str) -> None:
-        """Load model checkpoint."""
+        Checkpoints are saved to data/checkpoints/:
+        - t5_latest/    (most recent)
+        - t5_previous/  (before latest, for rollback)
+
+        Args:
+            name: Checkpoint name ("latest" rotates previous)
+
+        Returns:
+            Path to saved checkpoint.
+        """
+        if not self.model._initialized:
+            print("Model not initialized, skipping checkpoint save.")
+            return None
+
+        CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
+
+        latest_path = CHECKPOINTS_DIR / "t5_latest"
+        previous_path = CHECKPOINTS_DIR / "t5_previous"
+
+        if name == "latest":
+            # Rotate: delete previous, move latest to previous
+            if previous_path.exists():
+                import shutil
+                shutil.rmtree(previous_path)
+                print(f"Removed old previous checkpoint")
+
+            if latest_path.exists():
+                latest_path.rename(previous_path)
+                print(f"Moved latest -> previous")
+
+            save_path = latest_path
+        else:
+            save_path = CHECKPOINTS_DIR / f"t5_{name}"
+
+        # Save current model
+        self.model.model.save_pretrained(save_path)
+        self.model.processor.save_pretrained(save_path)
+
+        # Save training metadata
+        metadata = {
+            "total_pairs_trained": self.total_pairs_trained,
+            "timestamp": datetime.now().isoformat(),
+        }
+        with open(save_path / "training_metadata.json", "w") as f:
+            json.dump(metadata, f, indent=2)
+
+        print(f"Saved T5 checkpoint to {save_path}")
+        return save_path
+
+    def load_checkpoint(self, name: str = "latest") -> bool:
+        """Load model checkpoint.
+
+        Args:
+            name: "latest", "previous", or custom name
+
+        Returns:
+            True if loaded successfully, False otherwise.
+        """
         from transformers import AutoProcessor, AutoModelForSeq2SeqLM
 
-        self.model.processor = AutoProcessor.from_pretrained(path)
-        self.model.model = AutoModelForSeq2SeqLM.from_pretrained(
-            path,
-            device_map="auto",
-            torch_dtype=self.model.config.dtype,
-        )
-        self.model._initialized = True
-        print(f"Loaded checkpoint from {path}")
+        if name in ("latest", "previous"):
+            path = CHECKPOINTS_DIR / f"t5_{name}"
+        else:
+            path = CHECKPOINTS_DIR / f"t5_{name}"
+
+        if not path.exists():
+            print(f"Checkpoint not found: {path}")
+            return False
+
+        try:
+            self.model.processor = AutoProcessor.from_pretrained(path)
+            self.model.model = AutoModelForSeq2SeqLM.from_pretrained(
+                path,
+                torch_dtype=self.model.config.dtype,
+            ).to(self.model.config.device)
+            self.model._initialized = True
+
+            # Load training metadata if available
+            meta_path = path / "training_metadata.json"
+            if meta_path.exists():
+                with open(meta_path) as f:
+                    metadata = json.load(f)
+                    self.total_pairs_trained = metadata.get("total_pairs_trained", 0)
+
+            print(f"Loaded T5 checkpoint from {path}")
+            print(f"  Total pairs trained: {self.total_pairs_trained}")
+            return True
+
+        except Exception as e:
+            print(f"Failed to load checkpoint: {e}")
+            return False
+
+    def rollback(self) -> bool:
+        """Rollback to previous checkpoint (after a bad batch).
+
+        Returns:
+            True if rollback successful, False otherwise.
+        """
+        return self.load_checkpoint("previous")
 
     def load_used_data(self, max_files: int | None = None) -> list[TrainingPair]:
         """Load previously used training data for replay.
