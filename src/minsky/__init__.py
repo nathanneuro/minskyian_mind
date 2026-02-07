@@ -17,6 +17,15 @@ from minsky.orchestrator import Orchestrator, BatchedLLM, BatchedEditModel
 from minsky.config import RWKVConfig, EditModelConfig, SummarizerConfig, OrchestratorConfig
 from minsky.judges import JudgeInput, JudgeOutput, JUDGE_PROMPTS
 from minsky.edit_model import EditModel, TrainingPair, EditModelTrainer
+from minsky.tools import (
+    web_search,
+    scratchpad_write,
+    scratchpad_read,
+    python_exec,
+    execute_tool,
+    get_tools_description,
+    ToolResult,
+)
 
 __all__ = [
     # Types

@@ -17,6 +17,7 @@ class MessageType(Enum):
     # Sensory messages
     PERCEPTION = "perception"  # Raw input from the world
     ATTENTION_RESPONSE = "attention_response"  # Response to attention request
+    TOOL_OUTPUT = "tool_output"  # Output from a tool (Motor -> Sensory)
 
     # Planning messages
     ATTENTION_REQUEST = "attention_request"  # Request sensory to focus on something
@@ -27,6 +28,7 @@ class MessageType(Enum):
     # Motor messages
     ACTION = "action"  # Actual action taken in the world
     ACTION_RESULT = "action_result"  # Result of attempting an action
+    TOOL_CALL = "tool_call"  # Motor is calling a tool (for logging)
 
     # System messages
     CYCLE_START = "cycle_start"

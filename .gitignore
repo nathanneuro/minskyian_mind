@@ -18,3 +18,7 @@ subrepos/
 
 # Lock file
 uv.lock
+
+# Environment variables (secrets)
+.env
+.env.*
