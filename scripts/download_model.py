@@ -15,6 +15,9 @@ from huggingface_hub import hf_hub_download
 # T5 model for edit
 T5_MODEL = "google/t5gemma-2-270m-270m"
 
+# TODO: Alternative RWKV source (SafeTensors format, may be faster):
+# https://modelscope.cn/models/shoumenchougou/RWKV-7-World-ST/resolve/master/rwkv7-g1d-7.2b-20260131-ctx8192.st
+
 # Model configuration - RWKV7-G1 series from BlinkDL/rwkv7-g1
 MODELS = {
     # G1d series (latest, best quality) - Jan 2026
