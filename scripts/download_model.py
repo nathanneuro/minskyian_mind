@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Download RWKV model from HuggingFace.
+"""Download models from HuggingFace.
+
+Downloads:
+- RWKV7-G1 model (for inference)
+- T5Gemma model (for edit/training)
 
 Run with: uv run python scripts/download_model.py
 """
@@ -7,6 +11,9 @@ Run with: uv run python scripts/download_model.py
 import os
 from pathlib import Path
 from huggingface_hub import hf_hub_download
+
+# T5 model for edit
+T5_MODEL = "google/t5gemma-2-270m-270m"
 
 # Model configuration - RWKV7-G1 series from BlinkDL/rwkv7-g1
 MODELS = {
@@ -96,21 +103,50 @@ def download_model(model_key: str = DEFAULT_MODEL) -> Path:
     return Path(model_path)
 
 
+def download_t5() -> None:
+    """Download T5Gemma edit model."""
+    print(f"\nDownloading T5Gemma edit model: {T5_MODEL}")
+    print("This will be cached by transformers...")
+
+    from transformers import AutoProcessor, AutoModelForSeq2SeqLM
+    import torch
+
+    # Download processor and model (caches automatically)
+    processor = AutoProcessor.from_pretrained(T5_MODEL)
+    model = AutoModelForSeq2SeqLM.from_pretrained(
+        T5_MODEL,
+        torch_dtype=torch.bfloat16,
+    )
+
+    print(f"T5Gemma downloaded and cached.")
+    del model, processor  # Free memory
+
+
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Download RWKV model")
+    parser = argparse.ArgumentParser(description="Download models for Minsky")
     parser.add_argument(
         "--model",
         type=str,
         default=DEFAULT_MODEL,
         choices=list(MODELS.keys()),
-        help=f"Model to download (default: {DEFAULT_MODEL})"
+        help=f"RWKV model to download (default: {DEFAULT_MODEL})"
     )
     parser.add_argument(
         "--list",
         action="store_true",
-        help="List available models"
+        help="List available RWKV models"
+    )
+    parser.add_argument(
+        "--skip-rwkv",
+        action="store_true",
+        help="Skip RWKV download"
+    )
+    parser.add_argument(
+        "--skip-t5",
+        action="store_true",
+        help="Skip T5 download"
     )
     args = parser.parse_args()
 
@@ -121,17 +157,28 @@ def main():
             print(f"  {key:12} {info['size']:>10}  {info['filename']}")
         print()
         print(f"Default: {DEFAULT_MODEL}")
+        print(f"\nT5 model: {T5_MODEL} (~540 MB)")
         return
 
-    # Set environment for RWKV
-    os.environ["RWKV_V7_ON"] = "1"
-    os.environ["RWKV_JIT_ON"] = "1"
-    os.environ["RWKV_CUDA_ON"] = "1"
+    # Download RWKV
+    if not args.skip_rwkv:
+        os.environ["RWKV_V7_ON"] = "1"
+        os.environ["RWKV_JIT_ON"] = "1"
+        os.environ["RWKV_CUDA_ON"] = "1"
+        rwkv_path = download_model(args.model)
+    else:
+        print("Skipping RWKV download.")
 
-    path = download_model(args.model)
+    # Download T5
+    if not args.skip_t5:
+        download_t5()
+    else:
+        print("Skipping T5 download.")
 
-    print("\nTo use this model, run:")
-    print(f"  uv run python main.py --use-rwkv --rwkv-path {path}")
+    print("\n" + "=" * 60)
+    print("Downloads complete! Run experiment with:")
+    print("  uv run python main.py")
+    print("=" * 60)
 
 
 if __name__ == "__main__":

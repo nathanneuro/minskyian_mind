@@ -15,12 +15,14 @@ mkdir -p logs data outputs models
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 LOGFILE="logs/experiment_${TIMESTAMP}.log"
 
-# Check if model exists
+# Check if RWKV model exists, download both models if needed
 MODEL_DIR="models"
-if [ ! -f "$MODEL_DIR"/*.pth ]; then
+if ! ls "$MODEL_DIR"/*.pth 1> /dev/null 2>&1; then
     echo ""
-    echo "No model found. Downloading RWKV7-G1 7.2B..."
+    echo "Downloading models (RWKV 7.2B + T5Gemma)..."
     uv run python scripts/download_model.py --model g1d-7.2b
+else
+    echo "RWKV model found in $MODEL_DIR"
 fi
 
 echo ""
