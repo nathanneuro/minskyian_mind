@@ -3,7 +3,6 @@
 Tools:
 - web_search: Search the web using Exa API
 - scratchpad: Persistent key-value storage for notes
-- python_exec: Sandboxed Python code execution
 - memory_*: Long-term memory with FSRS-6 decay and semantic search
 
 IMPORTANT: Motor executes tools but does NOT see outputs.
@@ -12,8 +11,6 @@ Tool outputs go to Sensory, which perceives them.
 
 import os
 import json
-import subprocess
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -383,114 +380,6 @@ def scratchpad_list() -> ToolResult:
 
 
 # =============================================================================
-# Sandboxed Python Interpreter
-# =============================================================================
-
-PYTHON_TIMEOUT = 10  # seconds
-PYTHON_MAX_OUTPUT = 10000  # characters
-
-
-def python_exec(code: str, timeout: int = PYTHON_TIMEOUT) -> ToolResult:
-    """Execute Python code in a sandboxed subprocess.
-
-    The code runs in a separate process with:
-    - Limited execution time
-    - No network access (via restricted imports)
-    - Limited output size
-
-    Args:
-        code: Python code to execute.
-        timeout: Maximum execution time in seconds.
-
-    Returns:
-        ToolResult with stdout/stderr output.
-    """
-    # Create a wrapper script that restricts dangerous operations
-    wrapper = f'''
-import sys
-import io
-from contextlib import redirect_stdout, redirect_stderr
-
-# Restrict dangerous imports
-BLOCKED_MODULES = {{'os', 'subprocess', 'shutil', 'socket', 'requests', 'urllib', 'httpx'}}
-
-class RestrictedImporter:
-    def find_module(self, name, path=None):
-        if name.split('.')[0] in BLOCKED_MODULES:
-            raise ImportError(f"Import of '{{name}}' is not allowed in sandbox")
-        return None
-
-sys.meta_path.insert(0, RestrictedImporter())
-
-# Capture output
-stdout_capture = io.StringIO()
-stderr_capture = io.StringIO()
-
-try:
-    with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
-        exec("""
-{code.replace(chr(34)*3, chr(39)*3)}
-""")
-    print(stdout_capture.getvalue(), end='')
-    if stderr_capture.getvalue():
-        print("STDERR:", stderr_capture.getvalue(), file=sys.stderr)
-except Exception as e:
-    print(f"Error: {{type(e).__name__}}: {{e}}", file=sys.stderr)
-'''
-
-    try:
-        # Write wrapper to temp file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-            f.write(wrapper)
-            temp_path = f.name
-
-        try:
-            # Run in subprocess
-            result = subprocess.run(
-                ['python', temp_path],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'},
-            )
-
-            stdout = result.stdout[:PYTHON_MAX_OUTPUT]
-            stderr = result.stderr[:PYTHON_MAX_OUTPUT]
-
-            if result.returncode == 0:
-                return ToolResult(
-                    success=True,
-                    output=stdout if stdout else "(no output)",
-                    error=stderr if stderr else "",
-                    metadata={"returncode": result.returncode},
-                )
-            else:
-                return ToolResult(
-                    success=False,
-                    output=stdout,
-                    error=stderr if stderr else f"Process exited with code {result.returncode}",
-                    metadata={"returncode": result.returncode},
-                )
-
-        finally:
-            # Clean up temp file
-            Path(temp_path).unlink(missing_ok=True)
-
-    except subprocess.TimeoutExpired:
-        return ToolResult(
-            success=False,
-            output="",
-            error=f"Execution timed out after {timeout} seconds",
-        )
-    except Exception as e:
-        return ToolResult(
-            success=False,
-            output="",
-            error=f"Execution failed: {str(e)}",
-        )
-
-
-# =============================================================================
 # Memory System (Vestige-inspired)
 # =============================================================================
 
@@ -730,10 +619,6 @@ TOOLS = {
     "scratchpad_list": {
         "function": scratchpad_list,
         "description": "List all keys in persistent storage. No args.",
-    },
-    "python_exec": {
-        "function": python_exec,
-        "description": "Execute Python code in a sandbox. Args: code (str). Limited imports, 10s timeout.",
     },
     # Memory tools
     "memory_store": {

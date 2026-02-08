@@ -7,7 +7,7 @@ Architecture:
 - Summarizer agents (RWKV only) every N global steps
 - Memory system (FSRS-6 decay, dual-strength, hybrid search)
 
-Motor has tools: web_search, scratchpad, python_exec, memory_*
+Motor has tools: web_search, scratchpad, memory_*
 Motor executes tools but does NOT see outputs - those go to Sensory.
 Sensory summarizes all data and forwards to Planning and Motor.
 
@@ -26,7 +26,6 @@ from minsky.tools import (
     web_search,
     scratchpad_write,
     scratchpad_read,
-    python_exec,
     memory_store,
     memory_query,
     memory_promote,

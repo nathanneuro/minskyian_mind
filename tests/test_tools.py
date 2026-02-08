@@ -11,7 +11,6 @@ from minsky.tools import (
     get_tools_description,
     scratchpad_write,
     scratchpad_read,
-    python_exec,
     memory_store,
     memory_query,
     memory_stats,
@@ -101,39 +100,6 @@ class TestScratchpad:
         assert "updated" in result.output
 
 
-class TestPythonExec:
-    """Tests for python_exec tool."""
-
-    def test_print_output(self):
-        """Should capture print output."""
-        result = python_exec(code="print('hello world')")
-        assert result.success is True
-        assert "hello" in result.output.lower()
-
-    def test_print_expression(self):
-        """Should capture printed expressions."""
-        result = python_exec(code="print(2 + 2)")
-        assert result.success is True
-        assert "4" in result.output
-
-    def test_multiline_code(self):
-        """Should handle multiline code."""
-        result = python_exec(code="x = 10\ny = 20\nprint(x + y)")
-        assert result.success is True
-        assert "30" in result.output
-
-    def test_syntax_error_reported(self):
-        """Syntax errors should appear in error field."""
-        result = python_exec(code="def broken(")
-        # Errors go to stderr but process may still return 0
-        assert "SyntaxError" in result.error
-
-    def test_runtime_error_reported(self):
-        """Runtime errors should appear in error field."""
-        result = python_exec(code="1/0")
-        assert "ZeroDivision" in result.error
-
-
 class TestMemoryTools:
     """Tests for memory-related tools."""
 
@@ -183,7 +149,7 @@ class TestToolsRegistry:
         """Core tools should be registered."""
         assert "scratchpad_write" in TOOLS
         assert "scratchpad_read" in TOOLS
-        assert "python_exec" in TOOLS
+        assert "memory_store" in TOOLS
 
     def test_tools_have_descriptions(self):
         """All tools should have descriptions."""

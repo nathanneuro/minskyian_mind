@@ -80,12 +80,11 @@ Motor has access to these tools:
 - memory_query: Recall information from long-term memory by search
 - scratchpad_write: Save a value to short-term persistent storage
 - scratchpad_read: Read a value from short-term persistent storage
-- python_exec: Execute Python code in a sandbox
 - TO_EXTERNAL: Speak directly to the user (the primary way to deliver answers and responses)
 
 Evaluation criteria:
 - Fidelity: Did it follow the instruction correctly?
-- Tool choice: Did it pick the right tool for the task? (e.g. web_search for new info, memory_query for previously seen info, scratchpad for intermediate results)
+- Tool choice: Did it pick the right tool for the task? (e.g. web_search for new info, memory_query for previously seen info, scratchpad for intermediate results, TO_EXTERNAL to speak to user)
 - Translation: Was the high-level plan properly concretized into a tool call or response?
 - Execution: Was the action performed successfully?
 - Communication: Is the output clear and appropriate?
