@@ -5,8 +5,15 @@ from enum import Enum
 from typing import Any
 from datetime import datetime
 
-# Message length constraint (~256 chars ≈ 64 tokens)
+# Message length constraint (~256 chars ≈ 64 tokens).
+# Configurable via set_message_max_length() before orchestrator starts.
 MESSAGE_MAX_LENGTH = 256
+
+
+def set_message_max_length(n: int) -> None:
+    """Override the between-room message length limit."""
+    global MESSAGE_MAX_LENGTH
+    MESSAGE_MAX_LENGTH = n
 
 
 class RoomType(Enum):
@@ -38,8 +45,10 @@ class MessageType(Enum):
     CYCLE_END = "cycle_end"
 
 
-def truncate_message(content: str, max_length: int = MESSAGE_MAX_LENGTH) -> str:
+def truncate_message(content: str, max_length: int | None = None) -> str:
     """Truncate message content to max length, adding ellipsis if needed."""
+    if max_length is None:
+        max_length = MESSAGE_MAX_LENGTH
     if len(content) <= max_length:
         return content
     return content[:max_length - 3] + "..."

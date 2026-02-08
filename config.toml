@@ -8,6 +8,10 @@ prompt = "What is the most promising approach to measuring consciousness in AI s
 #   "improved" - judge counterfactual replaces routed messages each cycle
 room_output_source = "edited"
 
+# Max characters per between-room message (~256 chars ≈ 64 tokens).
+# External messages, tool calls/outputs are always unbounded.
+max_message_length = 256
+
 [run.features]
 llm = true
 t5 = true
@@ -58,6 +62,7 @@ model = "QuantTrio/DeepSeek-V3.2-AWQ"
 base_url = "https://api.infinity.inc/v1"
 api_key_env = "INF_API_KEY"
 max_tokens = 1000
+temperature = 0.7
 
 [t5]
 device = "cuda:1"

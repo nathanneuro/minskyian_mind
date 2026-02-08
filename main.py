@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 
 from minsky.orchestrator import Orchestrator
-from minsky.types import Message
+from minsky.types import Message, set_message_max_length
 
 LOG_DIR = Path(__file__).parent / "outputs" / "logs"
 
@@ -173,6 +173,10 @@ def main() -> None:
     judge_interval = intervals.get("judge", 1)
     room_output_source = run.get("room_output_source", "edited")
 
+    # Set between-room message length limit (must be before any Message creation)
+    max_message_length = run.get("max_message_length", 256)
+    set_message_max_length(max_message_length)
+
     def on_cycle_end_with_ext(cycle: int, outputs: list[Message]) -> None:
         """Callback at end of step: print + write external outputs to ext log."""
         print_cycle_end(cycle, outputs)
@@ -192,6 +196,7 @@ def main() -> None:
             base_url=agents_cfg.get("base_url", "https://api.infinity.inc/v1"),
             api_key_env=agents_cfg.get("api_key_env", "INF_API_KEY"),
             max_tokens=agents_cfg.get("max_tokens", 1000),
+            temperature=agents_cfg.get("temperature", 0.7),
         ))
 
     # Create the orchestrator
@@ -266,6 +271,7 @@ def main() -> None:
             orchestrator.use_fake_user = True
 
         print(f"Room output source: {room_output_source}")
+        print(f"Max message length: {max_message_length} chars")
         if room_output_source == "improved" and not orchestrator.use_judges:
             print("  WARNING: 'improved' mode requires judges — enabling judges")
             orchestrator.use_judges = True

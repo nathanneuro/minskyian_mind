@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Any
 
-from minsky.types import Message, RoomType, RoomState, MessageType
+from minsky.types import Message, RoomType, RoomState, MessageType, truncate_message
 from minsky.rooms import create_room_state, ROOM_PROCESSORS
 from minsky.judges import JudgeInput, JudgeOutput, judge_batch, summarize_batch, fake_user_respond, AgentConfig, configure_agents
 from minsky.edit_model import TrainingPair, save_training_pairs
@@ -358,7 +358,7 @@ class Orchestrator:
                 if jo.counterfactual != jo.original:
                     for msg in next_queue:
                         if msg.source == jo.room_type and msg.content == jo.original:
-                            msg.content = jo.counterfactual[:256]
+                            msg.content = truncate_message(jo.counterfactual)
                             break
 
         self.message_queue = next_queue

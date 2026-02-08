@@ -29,6 +29,7 @@ class AgentConfig:
     base_url: str = "https://api.infinity.inc/v1"
     api_key_env: str = "INF_API_KEY"
     max_tokens: int = 1000
+    temperature: float = 0.7
 
 
 _agent_config = AgentConfig()
@@ -248,6 +249,7 @@ async def _judge_one(
             model=_agent_config.model,
             messages=messages,
             max_tokens=_agent_config.max_tokens,
+            temperature=_agent_config.temperature,
         )
         raw = resp.choices[0].message.content
     except Exception as e:
@@ -316,6 +318,7 @@ async def _summarize_one(client: AsyncOpenAI, prompt: str) -> str:
             model=_agent_config.model,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=200,
+            temperature=_agent_config.temperature,
         )
         return resp.choices[0].message.content.strip()
     except Exception as e:
@@ -390,6 +393,7 @@ async def _fake_user_one(client: AsyncOpenAI, assistant_message: str, conversati
                 {"role": "user", "content": f"Conversation so far:\n{conversation_context}\n\nAssistant's latest response:\n{assistant_message}\n\nReply as the user:"},
             ],
             max_tokens=150,
+            temperature=_agent_config.temperature,
         )
         return resp.choices[0].message.content.strip()
     except Exception as e:
