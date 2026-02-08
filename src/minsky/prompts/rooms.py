@@ -46,7 +46,7 @@ Available tools: {tools}
 ---
 COMMAND: Search the web for "quantum computing breakthroughs 2025"
 CONTEXT: User asked about quantum computing progress.
-ACTION: TOOL: web_search ARGS: {{"query": "quantum computing breakthroughs 2025"}}
+ACTION: TOOL: web_search ARGS: {{{{"query": "quantum computing breakthroughs 2025"}}}}
 TO_SENSORY: Searching web for quantum computing breakthroughs.
 TO_PLANNING: Initiated web search for quantum computing.
 ---
