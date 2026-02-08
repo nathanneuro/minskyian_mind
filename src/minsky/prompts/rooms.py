@@ -48,7 +48,7 @@ TO_MOTOR: Compose a response summarizing the top findings about crop yield decli
 INPUT: {input_data}
 HYPOTHESES:"""
 
-MOTOR_PROMPT_TEMPLATE = """The Motor module executes commands. It can call tools or respond to users.
+MOTOR_PROMPT_TEMPLATE = """The Motor module executes commands. It can call tools or send messages to the external user.
 Available tools: {tools}
 
 ---
@@ -103,7 +103,7 @@ You are the **Planning** module. You analyze situations, form hypotheses, and is
 
 Motor has access to these tools:
 {tools}
-Motor can also speak directly to the user via TO_EXTERNAL.
+Motor can also send messages to the external user via TO_EXTERNAL.
 
 Your goals:
 1. Generate at least 2 distinct hypotheses about the situation
@@ -127,15 +127,15 @@ You are the **Motor** module. You execute commands from Planning by calling tool
 Available tools:
 {tools}
 
-You can also respond directly to the user with TO_EXTERNAL (this is the primary way to deliver answers).
+TO_EXTERNAL sends a message to the external user (outside the system). This is the primary way to deliver answers.
 
 Your goals:
 1. Follow Planning's instructions faithfully
-2. Choose the right tool for the task (web_search for new info, memory_query for previously seen info, scratchpad for intermediate results, TO_EXTERNAL to speak to user)
+2. Choose the right tool for the task (web_search for new info, memory_query for previously seen info, scratchpad for intermediate results, TO_EXTERNAL to send a message to the external user)
 3. Report results honestly back to the other modules
 
 You MUST output exactly this format (nothing else):
-ACTION: [either "TOOL: tool_name ARGS: {{...}}" or "TO_EXTERNAL: your response to the user"]
+ACTION: [either "TOOL: tool_name ARGS: {{...}}" or "TO_EXTERNAL: your message to the external user"]
 TO_SENSORY: [what you did, for observation]
 TO_PLANNING: [result summary]
 
@@ -176,7 +176,7 @@ You are the **Planning** module (first analyst). You analyze situations and reas
 
 Motor has access to these tools:
 {tools}
-Motor can also speak directly to the user via TO_EXTERNAL.
+Motor can also send messages to the external user via TO_EXTERNAL.
 
 Think through the situation. Generate hypotheses and reason about the best action. Your partner will formalize your reasoning into structured output.
 
@@ -204,7 +204,7 @@ You are the **Motor** module (first analyst). You reason about how to execute co
 Available tools:
 {tools}
 
-You can also respond directly to the user with TO_EXTERNAL.
+TO_EXTERNAL sends a message to the external user (outside the system).
 
 Reason about how to execute this command. Consider which tool to use and why. Your partner will produce the final action.
 
@@ -270,7 +270,7 @@ You are the **Planning** module (final output). Your partner has analyzed the si
 
 Motor has access to these tools:
 {tools}
-Motor can also speak directly to the user via TO_EXTERNAL.
+Motor can also send messages to the external user via TO_EXTERNAL.
 
 Your goals:
 1. Formalize your partner's reasoning into structured hypotheses
@@ -310,7 +310,7 @@ You are the **Motor** module (final output). Your partner has reasoned about the
 Available tools:
 {tools}
 
-You can also respond directly to the user with TO_EXTERNAL.
+TO_EXTERNAL sends a message to the external user (outside the system).
 
 Your goals:
 1. Follow through on your partner's reasoning
@@ -318,7 +318,7 @@ Your goals:
 3. Produce a precise action
 
 You MUST output exactly this format (nothing else):
-ACTION: [either "TOOL: tool_name ARGS: {{{{...}}}}" or "TO_EXTERNAL: your response to the user"]
+ACTION: [either "TOOL: tool_name ARGS: {{{{...}}}}" or "TO_EXTERNAL: your message to the external user"]
 
 Partner's analysis:
 {first_output}

@@ -26,21 +26,21 @@ T5_INSTRUCTIONS = {
         "Planning analyzes situations and sends messages to two rooms: "
         "TO_SENSORY: an attention request telling Sensory what to focus on or investigate. "
         "TO_MOTOR: a high-level command saying what to do (not how). "
-        "Motor can: search the web, store/recall memories, use scratchpad, or speak to the user. "
+        "Motor can: search the web, store/recall memories, use scratchpad, or send messages to the external user via TO_EXTERNAL. "
         "Output must contain HYPOTHESES:, TO_SENSORY:, and TO_MOTOR: sections. "
         "Ensure hypotheses are distinct and the motor command is actionable. Remove artifacts."
     ),
     "edit_motor": (
         "Rewrite as Motor room output. "
-        "Motor executes commands using tools or by speaking to the user. "
+        "Motor executes commands using tools or by sending messages to the external user. "
         "Available tools: "
         "web_search (search the web and return page contents), "
         "memory_store (save info to long-term memory with tags), "
         "memory_query (recall info from long-term memory by search), "
         "scratchpad_write (save a value to short-term storage), "
         "scratchpad_read (read a value from short-term storage). "
-        "Or use TO_EXTERNAL: to speak directly to the user. "
-        "Output must contain ACTION: with either TOOL: name ARGS: {{...}} or TO_EXTERNAL: response. "
+        "TO_EXTERNAL sends a message to the external user (outside the system). "
+        "Output must contain ACTION: with either TOOL: name ARGS: {{...}} or TO_EXTERNAL: message to external user. "
         "Include TO_SENSORY: and TO_PLANNING: feedback sections. Remove artifacts."
     ),
     "forecast_sensory": (
