@@ -150,13 +150,18 @@ def main() -> None:
     t5_cfg = cfg.get("t5", {})
 
     model_name = llm_cfg.get("model_name", "Qwen/Qwen3-8B")
+    llm_backend = llm_cfg.get("backend", "hf")
     llm_device = llm_cfg.get("device", "cuda:0")
 
     print("Minsky Society of Mind - Demo")
     print("=" * 60)
     print(f"Config: {args.config}")
     print("Architecture:")
-    print(f"  {llm_device}: {model_name} (frozen LLM)")
+    if llm_backend == "api":
+        base = llm_cfg.get("api_base_url") or "OpenAI"
+        print(f"  API: {model_name} via {base} (frozen LLM)")
+    else:
+        print(f"  {llm_device}: {model_name} (frozen LLM)")
     print("  GPU 1: T5Gemma 270M (learnable edit model)")
     print()
     print("Each global step: LLM batch → T5 batch → route outputs")
@@ -217,6 +222,8 @@ def main() -> None:
             strategy=llm_cfg.get("strategy", "cuda fp16"),
             state_save_interval=llm_cfg.get("state_save_interval", 100),
             use_cudagraph=llm_cfg.get("use_cudagraph", False),
+            api_base_url=llm_cfg.get("api_base_url", ""),
+            api_key_env=llm_cfg.get("api_key_env", ""),
         )
         orchestrator.rwkv.initialize(config)
         orchestrator.use_llm = True
@@ -226,9 +233,15 @@ def main() -> None:
         if use_t5:
             orchestrator.t5_edit.initialize()
             orchestrator.use_edit = True
-            print(f"Models loaded: {model_name} ({llm_device}) + T5 (GPU 1)")
+            if llm_backend == "api":
+                print(f"Models loaded: {model_name} (API) + T5 (GPU 1)")
+            else:
+                print(f"Models loaded: {model_name} ({llm_device}) + T5 (GPU 1)")
         else:
-            print(f"Model loaded: {model_name} ({llm_device}) only")
+            if llm_backend == "api":
+                print(f"Model loaded: {model_name} (API) only")
+            else:
+                print(f"Model loaded: {model_name} ({llm_device}) only")
 
         if use_summarizers:
             orchestrator.use_summarizers = True
