@@ -29,9 +29,14 @@ echo "Latest Log"
 echo "====================================================================="
 LOGFILE=$(ssh $SERVER "ls -t $REMOTE_DIR/outputs/logs/*.log 2>/dev/null | head -1")
 if [ -n "$LOGFILE" ]; then
-    echo "  File: $(basename "$LOGFILE")"
+    LOCAL_LOG_DIR="$(dirname "$0")/../outputs/logs"
+    mkdir -p "$LOCAL_LOG_DIR"
+    LOCAL_LOG="$LOCAL_LOG_DIR/$(basename "$LOGFILE")"
+    echo "  Copying $(basename "$LOGFILE") to $LOCAL_LOG ..."
+    scp "$SERVER:$LOGFILE" "$LOCAL_LOG" 2>/dev/null
+    echo "  Saved: $LOCAL_LOG"
     echo ""
-    ssh $SERVER "tail -30 '$LOGFILE'"
+    tail -30 "$LOCAL_LOG"
 else
     echo "  No log files yet"
 fi

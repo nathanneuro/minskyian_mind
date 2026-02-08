@@ -1,0 +1,31 @@
+[run]
+max_steps = 100
+prompt = "What is the most promising approach to measuring consciousness in AI systems?"
+
+[run.features]
+llm = true
+t5 = true
+summarizers = true
+judges = true
+forecasts = true
+fake_user = true
+
+[run.intervals]
+summarizer = 10
+judge = 1
+
+[rwkv]
+strategy = "cuda fp16"
+device = "cuda:0"
+max_tokens = 256
+temperature = 1.0
+top_p = 0.5
+
+[t5]
+device = "cuda:1"
+max_input_length = 512
+max_output_length = 512
+
+[training]
+learning_rate = 1e-4
+batch_size = 4

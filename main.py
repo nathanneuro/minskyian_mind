@@ -10,13 +10,14 @@ Each "global step" consists of:
 2. Batch all outputs through T5 edit model (GPU 1)
 3. Route edited outputs to target rooms
 
-Run with: uv run python main.py          # RWKV + T5 (default)
-Stub mode: uv run python main.py --no-llm # No models
-RWKV only: uv run python main.py --no-t5  # Skip T5
+Run with: uv run python main.py                    # loads config.toml
+Custom:   uv run python main.py --config other.toml
 """
 
 import argparse
+import re
 import sys
+import tomllib
 from datetime import datetime
 from pathlib import Path
 
@@ -27,16 +28,32 @@ LOG_DIR = Path(__file__).parent / "outputs" / "logs"
 
 
 class TeeStream:
-    """Write to both a file and the original stream."""
+    """Write to both a file and the original stream.
+
+    Progress bar output (carriage returns, tqdm-style lines) is shown on
+    the terminal but filtered out of the log file to keep logs clean.
+    """
+
+    # Matches tqdm-style progress: "  3%|██         | 1/30 [00:01<...]"
+    _PROGRESS_RE = re.compile(r"\d+%\|")
 
     def __init__(self, stream, log_file):
         self.stream = stream
         self.log_file = log_file
 
+    def _is_progress(self, data: str) -> bool:
+        """Return True if data looks like a progress bar update."""
+        if "\r" in data and "\n" not in data:
+            return True
+        if self._PROGRESS_RE.search(data):
+            return True
+        return False
+
     def write(self, data):
         self.stream.write(data)
-        self.log_file.write(data)
-        self.log_file.flush()
+        if not self._is_progress(data):
+            self.log_file.write(data)
+            self.log_file.flush()
 
     def flush(self):
         self.stream.flush()
@@ -58,6 +75,16 @@ def setup_logging() -> Path:
     sys.stderr = TeeStream(sys.__stderr__, log_file)
     print(f"Logging to {log_path}")
     return log_path
+
+
+def load_config(config_path: str) -> dict:
+    """Load configuration from a TOML file."""
+    path = Path(config_path)
+    if not path.exists():
+        print(f"ERROR: Config file not found: {path.resolve()}")
+        sys.exit(1)
+    with open(path, "rb") as f:
+        return tomllib.load(f)
 
 
 def print_message(msg: Message) -> None:
@@ -98,20 +125,19 @@ def main() -> None:
     setup_logging()
 
     parser = argparse.ArgumentParser(description="Minsky Society of Mind")
-    parser.add_argument("--no-llm", action="store_true", help="Run in stub mode (no RWKV, no T5)")
-    parser.add_argument("--no-t5", action="store_true", help="Disable T5 edit model (RWKV only)")
-    parser.add_argument("--rwkv-path", type=str, default=None, help="Path to RWKV model")
-    parser.add_argument("--max-steps", type=int, default=5, help="Maximum global steps")
-    parser.add_argument("--summarizer-interval", type=int, default=10, help="Run summarizers every N steps")
-    parser.add_argument("--judge-interval", type=int, default=1, help="Run judges every N steps")
-    parser.add_argument("--no-judges", action="store_true", help="Disable judges")
-    parser.add_argument("--no-forecasts", action="store_true", help="Disable sensory forecasts")
-    parser.add_argument("--no-fake-user", action="store_true", help="Disable simulated user (for manual testing)")
-    parser.add_argument("--prompt", type=str, default=None, help="Custom prompt")
+    parser.add_argument("--config", type=str, default="config.toml", help="Path to TOML config file")
     args = parser.parse_args()
+
+    cfg = load_config(args.config)
+    run = cfg.get("run", {})
+    features = run.get("features", {})
+    intervals = run.get("intervals", {})
+    rwkv_cfg = cfg.get("rwkv", {})
+    t5_cfg = cfg.get("t5", {})
 
     print("Minsky Society of Mind - Demo")
     print("=" * 60)
+    print(f"Config: {args.config}")
     print("Architecture:")
     print("  GPU 0: RWKV 7B (frozen LLM)")
     print("  GPU 1: T5Gemma 270M (learnable edit model)")
@@ -119,11 +145,15 @@ def main() -> None:
     print("Each global step: RWKV batch → T5 batch → route outputs")
     print("=" * 60)
 
+    max_steps = run.get("max_steps", 100)
+    summarizer_interval = intervals.get("summarizer", 10)
+    judge_interval = intervals.get("judge", 1)
+
     # Create the orchestrator
     orchestrator = Orchestrator(
-        max_cycles=args.max_steps,
-        summarizer_interval=args.summarizer_interval,
-        judge_interval=args.judge_interval,
+        max_cycles=max_steps,
+        summarizer_interval=summarizer_interval,
+        judge_interval=judge_interval,
         on_message=print_message,
         on_cycle_start=print_cycle_start,
         on_cycle_end=print_cycle_end,
@@ -131,49 +161,57 @@ def main() -> None:
         on_judge=print_judge,
     )
 
-    if args.no_llm:
-        print("\nRunning in stub mode (no RWKV, no T5). Remove --no-llm to use models.")
+    use_llm = features.get("llm", True)
+    use_t5 = features.get("t5", True)
+    use_summarizers = features.get("summarizers", True)
+    use_judges = features.get("judges", True)
+    use_forecasts = features.get("forecasts", True)
+    use_fake_user = features.get("fake_user", True)
+
+    if not use_llm:
+        print("\nRunning in stub mode (no RWKV, no T5).")
     else:
         print("\nLoading models...")
 
         # Initialize RWKV
         from minsky.llm_client import RWKVConfig
         config = RWKVConfig()
-        if args.rwkv_path:
-            config.model_path = args.rwkv_path
+        if rwkv_cfg.get("strategy"):
+            config.strategy = rwkv_cfg["strategy"]
+        if rwkv_cfg.get("device"):
+            config.device = rwkv_cfg["device"]
         orchestrator.rwkv.initialize(config)
         orchestrator.use_llm = True
         orchestrator.restore_from_saved_state()
 
-        # Initialize T5 (default on, use --no-t5 to disable)
-        if not args.no_t5:
+        # Initialize T5
+        if use_t5:
             orchestrator.t5_edit.initialize()
             orchestrator.use_edit = True
             print("Models loaded: RWKV (GPU 0) + T5 (GPU 1)")
         else:
             print("Model loaded: RWKV (GPU 0) only")
 
-        orchestrator.use_summarizers = True
-        if not args.no_judges:
+        if use_summarizers:
+            orchestrator.use_summarizers = True
+        if use_judges:
             orchestrator.use_judges = True
-        if not args.no_forecasts:
+        if use_forecasts:
             orchestrator.use_forecasts = True
-        if not args.no_fake_user:
+        if use_fake_user:
             orchestrator.use_fake_user = True
 
-        print(f"Summarizers enabled (every {args.summarizer_interval} steps)")
+        print(f"Summarizers enabled (every {summarizer_interval} steps)")
         if orchestrator.use_judges:
-            print(f"Judges enabled (every {args.judge_interval} steps)")
+            print(f"Judges enabled (every {judge_interval} steps)")
         if orchestrator.use_forecasts:
             print("Sensory forecasts enabled")
         if orchestrator.use_fake_user:
-            print("Fake user enabled (use --no-fake-user for manual testing)")
+            print("Fake user enabled")
 
-    # Run with a sample input
-    if args.prompt:
-        test_input = args.prompt
-    else:
-        test_input = "User asks: What is the most promising approach to measuring consciousness in AI systems?"
+    # Run with configured prompt
+    prompt = run.get("prompt", "What is the most promising approach to measuring consciousness in AI systems?")
+    test_input = f"User asks: {prompt}"
 
     print(f"\nINPUT: {test_input}")
     print("\nRunning global steps until output or max steps reached...")

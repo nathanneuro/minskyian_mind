@@ -43,27 +43,21 @@ else
     echo "RWKV model found in $MODEL_DIR"
 fi
 
+# Optional --config argument (defaults to config.toml)
+CONFIG="${1:-config.toml}"
+
 echo ""
 echo "Configuration:"
+echo "  - Config file: $CONFIG"
 echo "  - Model: RWKV7-G1 7.2B (14.4 GB)"
 echo "  - GPU 0: RWKV inference"
 echo "  - GPU 1: T5 edit model"
 echo "  - Log file: $LOGFILE"
 echo ""
 
-# Default prompt
-PROMPT="${1:-What is the most promising approach to measuring consciousness in AI systems?}"
-
-echo "Prompt: $PROMPT"
-echo ""
-
 # Launch with nohup
 echo "Launching experiment..."
-nohup uv run python main.py \
-    --max-steps 10 \
-    --summarizer-interval 5 \
-    --prompt "$PROMPT" \
-    > "$LOGFILE" 2>&1 &
+nohup uv run python main.py --config "$CONFIG" > "$LOGFILE" 2>&1 &
 
 # Get PID
 PID=$!

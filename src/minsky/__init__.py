@@ -19,7 +19,7 @@ Each global step:
 
 from minsky.types import Message, RoomType, MessageType, RoomState
 from minsky.orchestrator import Orchestrator, RWKVWrapper, T5EditWrapper
-from minsky.config import RWKVConfig, EditModelConfig, SummarizerConfig, OrchestratorConfig
+from minsky.config import load_config
 from minsky.judges import JudgeInput, JudgeOutput
 from minsky.edit_model import EditModel, TrainingPair, EditModelTrainer
 from minsky.tools import (
@@ -64,10 +64,7 @@ __all__ = [
     "planning_process",
     "motor_process",
     # Config
-    "RWKVConfig",
-    "EditModelConfig",
-    "SummarizerConfig",
-    "OrchestratorConfig",
+    "load_config",
     # Judges
     "JudgeInput",
     "JudgeOutput",
