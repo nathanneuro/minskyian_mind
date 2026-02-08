@@ -5,18 +5,26 @@ and generate outgoing messages. Rooms do not directly communicate - all
 message passing goes through the orchestrator.
 
 Data flow per room:
-1. llm_fn (RWKV base model) generates text via next-token prediction
+1. llm_fn generates text (RWKV via continuation, or Qwen via chat)
 2. edit_fn (T5) refines the raw text into structured output
-3. Only T5's output enters the room (RWKV output is never used directly)
-4. If T5 is unavailable (--no-t5), RWKV output is used as fallback
+3. Only T5's output enters the room (raw output is never used directly)
+4. If T5 is unavailable (--no-t5), raw output is used as fallback
 
-RWKV is a BASE MODEL (not chat-tuned). Prompts must be document-continuation
-style with few-shot examples so the model knows what to predict next.
+Prompt selection is based on llm_fn.use_chat_template:
+- False (RWKV): document-continuation with few-shot examples
+- True  (Qwen): instruction-style with explicit output format
+
+Dual-agent mode: when llm_fn is active, each room runs two agents
+("left" and "right") that converse before producing between-room output.
+The first agent analyzes freely; the second produces structured output.
+Order is randomized each cycle.
 """
 
+import random
 import re
 from minsky.types import (
     Message,
+    InternalMessage,
     RoomType,
     RoomState,
     MessageType,
@@ -30,6 +38,21 @@ from minsky.prompts.rooms import (
     SENSORY_PROMPT_TEMPLATE,
     PLANNING_PROMPT_TEMPLATE,
     MOTOR_PROMPT_TEMPLATE,
+    SENSORY_CHAT_TEMPLATE,
+    PLANNING_CHAT_TEMPLATE,
+    MOTOR_CHAT_TEMPLATE,
+    SENSORY_FIRST_CHAT_TEMPLATE,
+    SENSORY_FIRST_PROMPT_TEMPLATE,
+    SENSORY_SECOND_CHAT_TEMPLATE,
+    SENSORY_SECOND_PROMPT_TEMPLATE,
+    PLANNING_FIRST_CHAT_TEMPLATE,
+    PLANNING_FIRST_PROMPT_TEMPLATE,
+    PLANNING_SECOND_CHAT_TEMPLATE,
+    PLANNING_SECOND_PROMPT_TEMPLATE,
+    MOTOR_FIRST_CHAT_TEMPLATE,
+    MOTOR_FIRST_PROMPT_TEMPLATE,
+    MOTOR_SECOND_CHAT_TEMPLATE,
+    MOTOR_SECOND_PROMPT_TEMPLATE,
 )
 
 
@@ -60,6 +83,89 @@ def apply_edit(raw_llm_output: str, edit_fn, context: str = "", task_prefix: str
 
 
 # -----------------------------------------------------------------------------
+# Dual-agent helper
+# -----------------------------------------------------------------------------
+
+def _build_internal_context(state: RoomState) -> str:
+    """Build internal_context string from recent internal history."""
+    recent = state.internal_history[-6:]
+    if not recent:
+        return ""
+    lines = [f"[{m.agent}] {m.content[:200]}" for m in recent]
+    return "Recent in-room exchanges:\n" + "\n".join(lines)
+
+
+def run_dual_agents(
+    state: RoomState,
+    input_data: str,
+    llm_fn,
+    edit_fn,
+    first_chat_template: str,
+    second_chat_template: str,
+    first_prompt_template: str,
+    second_prompt_template: str,
+    is_chat: bool,
+    task_prefix: str,
+    cycle: int,
+    format_kwargs: dict | None = None,
+) -> tuple[RoomState, str, str, str]:
+    """Run first->second agent exchange.
+
+    Returns (state, edited_output, first_raw, second_raw).
+    """
+    internal_context = _build_internal_context(state)
+    fmt = format_kwargs or {}
+
+    # Randomize which side goes first
+    first_side = random.choice(["left", "right"])
+    second_side = "right" if first_side == "left" else "left"
+
+    # --- First agent: free-form analysis ---
+    if is_chat:
+        first_prompt = first_chat_template.format(
+            input_data=input_data, internal_context=internal_context, **fmt
+        )
+    else:
+        first_prompt = first_prompt_template.format(
+            input_data=input_data, internal_context=internal_context, **fmt
+        )
+    first_raw = llm_fn(first_prompt)
+
+    state.add_internal(InternalMessage(
+        content=first_raw,
+        agent=first_side,
+        room_type=state.room_type,
+        cycle=cycle,
+    ))
+
+    # --- Second agent: structured output ---
+    if is_chat:
+        second_prompt = second_chat_template.format(
+            first_output=first_raw, input_data=input_data, **fmt
+        )
+    else:
+        second_prompt = second_prompt_template.format(
+            first_output=first_raw, input_data=input_data, **fmt
+        )
+    second_raw = llm_fn(second_prompt)
+
+    state.add_internal(InternalMessage(
+        content=second_raw,
+        agent=second_side,
+        room_type=state.room_type,
+        cycle=cycle,
+    ))
+
+    # Build raw_output: for RWKV, prepend continuation prefix
+    raw_output = second_raw
+
+    # Apply T5 edit on the second agent's output
+    edited = apply_edit(raw_output, edit_fn, context=input_data[:80], task_prefix=task_prefix)
+
+    return state, edited, first_raw, second_raw
+
+
+# -----------------------------------------------------------------------------
 # Sensory Room
 # -----------------------------------------------------------------------------
 
@@ -68,7 +174,7 @@ def sensory_process(
     incoming: list[Message],
     llm_fn=None,
     edit_fn=None,
-) -> tuple[RoomState, list[Message]]:
+) -> tuple[RoomState, list[Message], str]:
     """
     Process incoming messages in the Sensory room.
 
@@ -109,11 +215,29 @@ def sensory_process(
         parts.append(f"Planning asks you to focus on: {attention_request[:80]}")
     combined = " | ".join(parts) if parts else "No new data this cycle."
 
+    raw_output = ""
     if llm_fn:
-        prompt = SENSORY_PROMPT_TEMPLATE.format(input_data=combined)
-        raw = llm_fn(prompt)
-        response = "TO_PLANNING:" + raw  # Prepend since prompt ends at TO_PLANNING:
-        response = apply_edit(response, edit_fn, context=combined[:80], task_prefix="edit_sensory")
+        is_chat = getattr(llm_fn, "use_chat_template", False)
+        cycle = incoming[0].cycle if incoming else 0
+
+        state, edited, first_raw, second_raw = run_dual_agents(
+            state=state,
+            input_data=combined,
+            llm_fn=llm_fn,
+            edit_fn=edit_fn,
+            first_chat_template=SENSORY_FIRST_CHAT_TEMPLATE,
+            second_chat_template=SENSORY_SECOND_CHAT_TEMPLATE,
+            first_prompt_template=SENSORY_FIRST_PROMPT_TEMPLATE,
+            second_prompt_template=SENSORY_SECOND_PROMPT_TEMPLATE,
+            is_chat=is_chat,
+            task_prefix="edit_sensory",
+            cycle=cycle,
+        )
+        # For RWKV, second agent continues from "TO_PLANNING:" so prepend
+        if not is_chat:
+            edited = "TO_PLANNING:" + edited
+        raw_output = second_raw
+        response = edited
 
         planning_match = re.search(r'TO_PLANNING:\s*(.+?)(?=TO_MOTOR:|$)', response, re.IGNORECASE | re.DOTALL)
         motor_match = re.search(r'TO_MOTOR:\s*(.+?)$', response, re.IGNORECASE | re.DOTALL)
@@ -143,7 +267,7 @@ def sensory_process(
         ),
     ]
 
-    return state, outgoing
+    return state, outgoing, raw_output
 
 
 # -----------------------------------------------------------------------------
@@ -155,7 +279,7 @@ def planning_process(
     incoming: list[Message],
     llm_fn=None,
     edit_fn=None,
-) -> tuple[RoomState, list[Message]]:
+) -> tuple[RoomState, list[Message], str]:
     """
     Process incoming messages in the Planning room.
 
@@ -180,11 +304,29 @@ def planning_process(
         input_parts.append(f"Previous action result: {action_result}")
     input_data = " | ".join(input_parts)
 
+    raw_output = ""
     if llm_fn:
-        prompt = PLANNING_PROMPT_TEMPLATE.format(input_data=input_data)
-        raw = llm_fn(prompt)
-        response = "HYPOTHESES:" + raw  # Prepend since prompt ends at HYPOTHESES:
-        response = apply_edit(response, edit_fn, context=sensory_data[:80], task_prefix="edit_planning")
+        is_chat = getattr(llm_fn, "use_chat_template", False)
+        cycle = incoming[0].cycle if incoming else 0
+
+        state, edited, first_raw, second_raw = run_dual_agents(
+            state=state,
+            input_data=input_data,
+            llm_fn=llm_fn,
+            edit_fn=edit_fn,
+            first_chat_template=PLANNING_FIRST_CHAT_TEMPLATE,
+            second_chat_template=PLANNING_SECOND_CHAT_TEMPLATE,
+            first_prompt_template=PLANNING_FIRST_PROMPT_TEMPLATE,
+            second_prompt_template=PLANNING_SECOND_PROMPT_TEMPLATE,
+            is_chat=is_chat,
+            task_prefix="edit_planning",
+            cycle=cycle,
+        )
+        # For RWKV, second agent continues from "HYPOTHESES:" so prepend
+        if not is_chat:
+            edited = "HYPOTHESES:" + edited
+        raw_output = second_raw
+        response = edited
         state.metadata["last_planning_response"] = response
 
         sensory_match = re.search(r'TO_SENSORY:\s*(.+?)(?=TO_MOTOR:|$)', response, re.IGNORECASE | re.DOTALL)
@@ -215,7 +357,7 @@ def planning_process(
         ),
     ]
 
-    return state, outgoing
+    return state, outgoing, raw_output
 
 
 # -----------------------------------------------------------------------------
@@ -271,7 +413,7 @@ def motor_process(
     llm_fn=None,
     edit_fn=None,
     action_fn=None,
-) -> tuple[RoomState, list[Message]]:
+) -> tuple[RoomState, list[Message], str]:
     """
     Process incoming messages in the Motor room.
 
@@ -279,6 +421,8 @@ def motor_process(
     - motor_to_sensory: Tool output (Motor doesn't see this)
     - motor_to_planning: Action result summary
     - motor_to_external: User-facing response (if any)
+
+    Between-room messages are programmatic (not LLM-generated).
     """
     command: str = ""
     sensory_context: str = ""
@@ -294,16 +438,32 @@ def motor_process(
     to_sensory = ""
     to_planning = ""
     to_external = ""
+    raw_output = ""
 
     if command:
         if llm_fn:
-            prompt = MOTOR_PROMPT_TEMPLATE.format(
-                command=command[:200],
-                context=sensory_context[:200],
+            is_chat = getattr(llm_fn, "use_chat_template", False)
+            cycle = incoming[0].cycle if incoming else 0
+
+            state, edited, first_raw, second_raw = run_dual_agents(
+                state=state,
+                input_data=command[:200],
+                llm_fn=llm_fn,
+                edit_fn=edit_fn,
+                first_chat_template=MOTOR_FIRST_CHAT_TEMPLATE,
+                second_chat_template=MOTOR_SECOND_CHAT_TEMPLATE,
+                first_prompt_template=MOTOR_FIRST_PROMPT_TEMPLATE,
+                second_prompt_template=MOTOR_SECOND_PROMPT_TEMPLATE,
+                is_chat=is_chat,
+                task_prefix="edit_motor",
+                cycle=cycle,
+                format_kwargs={"command": command[:200], "context": sensory_context[:200]},
             )
-            raw = llm_fn(prompt)
-            output = "ACTION:" + raw  # Prepend since prompt ends at ACTION:
-            output = apply_edit(output, edit_fn, context=command[:80], task_prefix="edit_motor")
+            # For RWKV, second agent continues from "ACTION:" so prepend
+            if not is_chat:
+                edited = "ACTION:" + edited
+            raw_output = second_raw
+            output = edited
 
             action_type, tool_args, response = parse_motor_output(output)
 
@@ -317,18 +477,17 @@ def motor_process(
                     "success": result.success,
                 })
 
+                # Programmatic between-room messages
                 to_sensory = f"[{tool_name}] {'OK' if result.success else 'FAIL'}: {result.output if result.success else result.error}"
-                to_planning = f"Called {tool_name}({tool_args})"
+                to_planning = f"Called {tool_name}({tool_args}) -> {'OK' if result.success else 'FAIL'}"
                 to_external = ""
             else:
-                # Parse structured fields from T5-edited response
-                sensory_match = re.search(r'TO_SENSORY:\s*(.+?)(?=\nTO_PLANNING:|\nTO_EXTERNAL:|$)', output, re.IGNORECASE | re.DOTALL)
-                planning_match = re.search(r'TO_PLANNING:\s*(.+?)(?=\nTO_SENSORY:|\nTO_EXTERNAL:|$)', output, re.IGNORECASE | re.DOTALL)
-                external_match = re.search(r'TO_EXTERNAL:\s*(.+?)(?=\nTO_SENSORY:|\nTO_PLANNING:|$)', output, re.IGNORECASE | re.DOTALL)
-
-                to_sensory = sensory_match.group(1).strip() if sensory_match else f"Executed: {command[:80]}"
-                to_planning = planning_match.group(1).strip() if planning_match else f"Done: {command[:80]}"
-                to_external = external_match.group(1).strip() if external_match else (response or "")
+                # TO_EXTERNAL: LLM-generated response is the one exception
+                external_response = response or ""
+                to_external = external_response
+                # Programmatic between-room messages
+                to_sensory = f"Responded to user: {external_response[:80]}"
+                to_planning = "Sent response to user"
         else:
             to_sensory = f"[Stub] Executing: {command[:100]}"
             to_planning = f"Action taken: {command[:100]}"
@@ -367,7 +526,7 @@ def motor_process(
         ),
     ]
 
-    return state, outgoing
+    return state, outgoing, raw_output
 
 
 # -----------------------------------------------------------------------------

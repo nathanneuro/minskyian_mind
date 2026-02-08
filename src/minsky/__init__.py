@@ -2,9 +2,9 @@
 
 Architecture:
 - Three rooms: Sensory (summarizes data), Planning (hypotheses), Motor (actions)
-- Frozen LLM (RWKV 7B on GPU 0) for cognition
+- Frozen LLM (configurable, default Qwen3-8B on GPU 0) for cognition
 - Learnable T5 edit model (T5Gemma 270M on GPU 1) for adaptation
-- Summarizer agents (RWKV only) every N global steps
+- Summarizer agents every N global steps
 - Memory system (FSRS-6 decay, dual-strength, hybrid search)
 
 Motor has tools: web_search, scratchpad, memory_*
@@ -12,13 +12,13 @@ Motor executes tools but does NOT see outputs - those go to Sensory.
 Sensory summarizes all data and forwards to Planning and Motor.
 
 Each global step:
-1. Batch all room prompts through RWKV (GPU 0)
+1. Batch all room prompts through LLM (GPU 0)
 2. Batch all outputs through T5 edit model (GPU 1)
 3. Route edited outputs to target rooms
 """
 
-from minsky.types import Message, RoomType, MessageType, RoomState
-from minsky.orchestrator import Orchestrator, RWKVWrapper, T5EditWrapper
+from minsky.types import Message, RoomType, MessageType, RoomState, InternalMessage
+from minsky.orchestrator import Orchestrator, LLMWrapper, RWKVWrapper, T5EditWrapper
 from minsky.config import load_config
 from minsky.judges import JudgeInput, JudgeOutput
 from minsky.edit_model import EditModel, TrainingPair, EditModelTrainer
@@ -36,7 +36,7 @@ from minsky.tools import (
     ToolResult,
 )
 from minsky.memory import Memory, MemoryStore, MemoryState, get_memory_store
-from minsky.rooms import ROOM_PROCESSORS, sensory_process, planning_process, motor_process
+from minsky.rooms import ROOM_PROCESSORS, sensory_process, planning_process, motor_process, run_dual_agents
 from minsky.prompts import (
     SENSORY_PROMPT_TEMPLATE,
     PLANNING_PROMPT_TEMPLATE,
@@ -51,11 +51,13 @@ from minsky.prompts import (
 __all__ = [
     # Types
     "Message",
+    "InternalMessage",
     "RoomType",
     "MessageType",
     "RoomState",
     # Orchestrator
     "Orchestrator",
+    "LLMWrapper",
     "RWKVWrapper",
     "T5EditWrapper",
     # Room processors
@@ -63,6 +65,7 @@ __all__ = [
     "sensory_process",
     "planning_process",
     "motor_process",
+    "run_dual_agents",
     # Config
     "load_config",
     # Judges

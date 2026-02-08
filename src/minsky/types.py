@@ -70,11 +70,21 @@ class Message:
 
 
 @dataclass
+class InternalMessage:
+    """In-room message between left and right agents. NOT truncated."""
+    content: str
+    agent: str  # "left" or "right"
+    room_type: RoomType
+    cycle: int = 0
+
+
+@dataclass
 class RoomState:
     """State maintained by a room across cycles."""
 
     room_type: RoomType
     message_history: list[Message] = field(default_factory=list)
+    internal_history: list[InternalMessage] = field(default_factory=list)
     current_context: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -83,6 +93,12 @@ class RoomState:
 
     def get_recent_messages(self, n: int = 10) -> list[Message]:
         return self.message_history[-n:]
+
+    def add_internal(self, msg: InternalMessage) -> None:
+        """Add an internal message with sliding window (keep last 20)."""
+        self.internal_history.append(msg)
+        if len(self.internal_history) > 20:
+            self.internal_history = self.internal_history[-20:]
 
 
 @dataclass
