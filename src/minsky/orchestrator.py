@@ -203,8 +203,8 @@ class Orchestrator:
     judge_interval: int = 1  # Run judges every N global steps
     save_training_pairs: bool = True  # Save to data/train_data/
     training_pairs: list[TrainingPair] = field(default_factory=list)
-    # (room_type, t5_edited, raw_output, context, history)
-    pending_evaluations: list[tuple[RoomType, str, str, str, list[tuple[str, str, str]] | None]] = field(default_factory=list)
+    # (room_type, representative, raw_output, t5_output, context, history)
+    pending_evaluations: list[tuple[RoomType, str, str, str, str, list[tuple[str, str, str]] | None]] = field(default_factory=list)
 
     # Forecast settings
     use_forecasts: bool = False
@@ -344,9 +344,11 @@ class Orchestrator:
                     None,
                 )
                 if representative:
+                    # t5_output is the representative when T5 was active, "" otherwise
+                    t5_output = representative if edit_fn is not None else ""
                     history = self._extract_history(room_type)
                     self.pending_evaluations.append(
-                        (room_type, representative, raw_output, new_state.current_context, history)
+                        (room_type, representative, raw_output, t5_output, new_state.current_context, history)
                     )
 
         # "improved" mode: run judges immediately and replace queued messages
@@ -437,19 +439,20 @@ class Orchestrator:
         if not self.pending_evaluations:
             return []
 
-        # Build judge inputs (judge evaluates the t5_edited output)
+        # Build judge inputs (judge evaluates the actual room output)
         judge_inputs = [
             JudgeInput(
                 room_type=room_type,
-                room_output=t5_edited,
+                room_output=representative,
                 context=context,
                 message_history=history,
             )
-            for room_type, t5_edited, _raw, context, history in self.pending_evaluations
+            for room_type, representative, _raw, _t5, context, history in self.pending_evaluations
         ]
 
-        # Build raw_output lookup keyed by index
-        raw_outputs = [raw for _, _, raw, _, _ in self.pending_evaluations]
+        # Build lookup lists keyed by index
+        raw_outputs = [raw for _, _, raw, _, _, _ in self.pending_evaluations]
+        t5_outputs = [t5 for _, _, _, t5, _, _ in self.pending_evaluations]
 
         # Run all evaluations concurrently via agent API
         judge_outputs = judge_batch(judge_inputs)
@@ -460,7 +463,7 @@ class Orchestrator:
             if judge_output.counterfactual != judge_output.original:
                 pair = TrainingPair(
                     raw=raw_outputs[i],
-                    t5_edited=judge_output.original,
+                    t5_edited=t5_outputs[i],  # "" when T5 was off
                     improved=judge_output.counterfactual,
                     task_prefix=f"edit_{judge_output.room_type.value}",
                     score=judge_output.score,
