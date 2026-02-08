@@ -49,13 +49,47 @@ class ToolResult:
 EXA_API_KEY = os.getenv("EXA_API_KEY", "")
 EXA_API_URL = "https://api.exa.ai/search"
 
+# Per-page content limits
+PAGE_CONTENT_MAX_CHARS = 3000  # Max chars per page
+TOTAL_CONTENT_MAX_CHARS = 12000  # Max total chars across all pages
+FETCH_TIMEOUT = 15.0  # Timeout for individual page fetches
+
+
+def _fetch_and_clean(url: str) -> str:
+    """Fetch a URL and extract clean text content.
+
+    Uses trafilatura for extraction. Returns empty string on failure.
+    """
+    try:
+        import trafilatura
+
+        resp = httpx.get(url, timeout=FETCH_TIMEOUT, follow_redirects=True)
+        resp.raise_for_status()
+        text = trafilatura.extract(resp.text, include_links=False, include_comments=False)
+        return text or ""
+    except Exception as e:
+        print(f"Fetch failed for {url}: {e}")
+        return ""
+
+
+def _fetch_pages_concurrent(urls: list[str]) -> list[str]:
+    """Fetch and clean multiple URLs concurrently."""
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+        return list(pool.map(_fetch_and_clean, urls))
+
 
 def web_search(
     query: str,
-    num_results: int = 5,
+    num_results: int = 3,
     use_autoprompt: bool = True,
 ) -> ToolResult:
-    """Search the web using Exa API.
+    """Search the web and return cleaned page contents.
+
+    Two-step process:
+    1. Search via Exa API (requests full text content from Exa)
+    2. For results missing content, fetch and extract via trafilatura
 
     Args:
         query: Search query.
@@ -63,7 +97,7 @@ def web_search(
         use_autoprompt: Let Exa optimize the query.
 
     Returns:
-        ToolResult with search results.
+        ToolResult with search results including page content.
     """
     if not EXA_API_KEY:
         return ToolResult(
@@ -73,6 +107,7 @@ def web_search(
         )
 
     try:
+        # Step 1: Search with Exa, requesting full text content
         response = httpx.post(
             EXA_API_URL,
             headers={
@@ -84,27 +119,72 @@ def web_search(
                 "numResults": num_results,
                 "useAutoprompt": use_autoprompt,
                 "type": "neural",
+                "contents": {
+                    "text": {"maxCharacters": PAGE_CONTENT_MAX_CHARS},
+                },
             },
             timeout=30.0,
         )
         response.raise_for_status()
         data = response.json()
 
-        # Format results
-        results = []
-        for i, result in enumerate(data.get("results", []), 1):
-            results.append(
-                f"{i}. {result.get('title', 'No title')}\n"
-                f"   URL: {result.get('url', '')}\n"
-                f"   {result.get('text', '')[:200]}..."
+        raw_results = data.get("results", [])
+        if not raw_results:
+            return ToolResult(
+                success=True,
+                output=f"No results found for: {query}",
+                metadata={"num_results": 0, "query": query},
             )
 
-        output = f"Search results for: {query}\n\n" + "\n\n".join(results)
+        # Step 2: For results without content, fetch pages directly
+        urls_to_fetch = []
+        fetch_indices = []
+        for i, result in enumerate(raw_results):
+            text = result.get("text", "").strip()
+            if not text or len(text) < 50:
+                urls_to_fetch.append(result.get("url", ""))
+                fetch_indices.append(i)
+
+        if urls_to_fetch:
+            fetched = _fetch_pages_concurrent(urls_to_fetch)
+            for idx, content in zip(fetch_indices, fetched):
+                if content:
+                    raw_results[idx]["text"] = content[:PAGE_CONTENT_MAX_CHARS]
+
+        # Format results with full content
+        formatted = []
+        total_chars = 0
+        for i, result in enumerate(raw_results, 1):
+            title = result.get("title", "No title")
+            url = result.get("url", "")
+            text = result.get("text", "").strip()
+
+            # Truncate to stay within total budget
+            remaining = TOTAL_CONTENT_MAX_CHARS - total_chars
+            if remaining <= 0:
+                break
+            text = text[:min(PAGE_CONTENT_MAX_CHARS, remaining)]
+            total_chars += len(text)
+
+            if text:
+                formatted.append(
+                    f"[{i}] {title}\n"
+                    f"URL: {url}\n"
+                    f"CONTENT:\n{text}"
+                )
+            else:
+                formatted.append(
+                    f"[{i}] {title}\n"
+                    f"URL: {url}\n"
+                    f"CONTENT: (could not retrieve)"
+                )
+
+        output = f"Search results for: {query}\n\n" + "\n\n---\n\n".join(formatted)
 
         return ToolResult(
             success=True,
             output=output,
-            metadata={"num_results": len(results), "query": query},
+            metadata={"num_results": len(formatted), "query": query},
         )
 
     except httpx.HTTPStatusError as e:
@@ -569,7 +649,7 @@ def memory_stats() -> ToolResult:
 TOOLS = {
     "web_search": {
         "function": web_search,
-        "description": "Search the web for information. Args: query (str), num_results (int, optional)",
+        "description": "Search the web and return page contents. Args: query (str), num_results (int, optional, default 3)",
     },
     "scratchpad_write": {
         "function": scratchpad_write,

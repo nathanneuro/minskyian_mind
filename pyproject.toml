@@ -17,6 +17,7 @@ dependencies = [
     "huggingface-hub",
     "openai",
     "pillow",
+    "trafilatura",
 ]
 
 [tool.setuptools.packages.find]
