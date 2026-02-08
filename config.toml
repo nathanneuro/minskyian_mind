@@ -45,3 +45,4 @@ max_output_length = 512
 [training]
 learning_rate = 1e-4
 batch_size = 4
+epochs = 1

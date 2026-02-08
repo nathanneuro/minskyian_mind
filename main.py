@@ -66,15 +66,23 @@ class TeeStream:
         return self.stream.isatty()
 
 
-def setup_logging() -> Path:
-    """Tee stdout and stderr to a timestamped log file in outputs/logs/."""
+def setup_logging() -> tuple[Path, Path]:
+    """Tee stdout/stderr to a full log file; also create an external-view log.
+
+    Returns (full_log_path, external_log_path).
+    """
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    log_path = LOG_DIR / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+    log_path = LOG_DIR / f"{timestamp}.log"
     log_file = open(log_path, "w")
     sys.stdout = TeeStream(sys.__stdout__, log_file)
     sys.stderr = TeeStream(sys.__stderr__, log_file)
+
+    ext_log_path = LOG_DIR / f"{timestamp}_external.log"
     print(f"Logging to {log_path}")
-    return log_path
+    print(f"External view log: {ext_log_path}")
+    return log_path, ext_log_path
 
 
 def load_config(config_path: str) -> dict:
@@ -122,7 +130,13 @@ def print_judge(judge_output) -> None:
 
 def main() -> None:
     """Run a demo of the Society of Mind architecture."""
-    setup_logging()
+    _, ext_log_path = setup_logging()
+    ext_log = open(ext_log_path, "w")
+
+    def write_external(text: str) -> None:
+        """Write a line to the external view log."""
+        ext_log.write(text + "\n")
+        ext_log.flush()
 
     parser = argparse.ArgumentParser(description="Minsky Society of Mind")
     parser.add_argument("--config", type=str, default="config.toml", help="Path to TOML config file")
@@ -152,6 +166,17 @@ def main() -> None:
     summarizer_interval = intervals.get("summarizer", 10)
     judge_interval = intervals.get("judge", 1)
 
+    def on_cycle_end_with_ext(cycle: int, outputs: list[Message]) -> None:
+        """Callback at end of step: print + write external outputs to ext log."""
+        print_cycle_end(cycle, outputs)
+        for out in outputs:
+            if out.content:
+                write_external(f"[step {cycle}] Assistant: {out.content}")
+
+    def on_fake_user(reply: str) -> None:
+        """Write fake user reply to external log."""
+        write_external(f"User: {reply}")
+
     # Create the orchestrator
     orchestrator = Orchestrator(
         max_cycles=max_steps,
@@ -159,9 +184,10 @@ def main() -> None:
         judge_interval=judge_interval,
         on_message=print_message,
         on_cycle_start=print_cycle_start,
-        on_cycle_end=print_cycle_end,
+        on_cycle_end=on_cycle_end_with_ext,
         on_summarize=print_summarize,
         on_judge=print_judge,
+        on_fake_user=on_fake_user,
     )
 
     use_llm = features.get("llm", True)
@@ -226,6 +252,7 @@ def main() -> None:
     test_input = f"User asks: {prompt}"
 
     print(f"\nINPUT: {test_input}")
+    write_external(f"User: {prompt}")
     print("\nRunning global steps until output or max steps reached...")
 
     outputs = orchestrator.run_until_output(test_input)

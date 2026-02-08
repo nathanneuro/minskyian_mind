@@ -213,6 +213,7 @@ class Orchestrator:
     on_cycle_end: Callable[[int, list[Message]], None] | None = None
     on_summarize: Callable[[str, str], None] | None = None  # (room, summary)
     on_judge: Callable[[JudgeOutput], None] | None = None  # Called when judge evaluates
+    on_fake_user: Callable[[str], None] | None = None  # Called with fake user reply
 
     def restore_from_saved_state(self) -> None:
         """Restore orchestrator state (e.g. global_step) from LLM saved metadata."""
@@ -481,6 +482,8 @@ class Orchestrator:
         user_reply = fake_user_respond(assistant_text, conversation_context)
         if user_reply:
             print(f"  FAKE USER: {user_reply[:150]}")
+            if self.on_fake_user:
+                self.on_fake_user(user_reply)
             self.inject_message(Message(
                 content=user_reply,
                 source=RoomType.EXTERNAL,
