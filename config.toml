@@ -1,5 +1,5 @@
 [run]
-max_steps = 100
+max_steps = 200
 prompt = "What is the most promising approach to measuring consciousness in AI systems?"
 
 [run.features]
@@ -14,12 +14,28 @@ fake_user = true
 summarizer = 10
 judge = 1
 
-[rwkv]
-strategy = "cuda fp16"
+[llm]
+backend = "hf"
+model_name = "Qwen/Qwen3-8B"
 device = "cuda:0"
+dtype = "float16"
 max_tokens = 256
-temperature = 1.0
-top_p = 0.5
+temperature = 0.7
+top_p = 0.9
+use_chat_template = true
+
+# To switch to RWKV, replace [llm] above with:
+# [llm]
+# backend = "rwkv"
+# model_name = "data/models/rwkv7-g1d-7.2b-20260131-ctx8192"
+# device = "cuda:0"
+# dtype = "float16"
+# max_tokens = 256
+# temperature = 1.0
+# top_p = 0.5
+# strategy = "cuda fp16"
+# state_file = "rwkv_state.pt"
+# use_chat_template = false
 
 [t5]
 device = "cuda:1"

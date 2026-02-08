@@ -19,46 +19,51 @@ from minsky.prompts.t5 import format_t5_prompt
 
 
 @dataclass
-class RWKVWrapper:
-    """Wraps RWKV client to provide llm_fn interface for room processors."""
+class LLMWrapper:
+    """Wraps LLM client to provide llm_fn interface for room processors.
+
+    Delegates to either HFClient or RWKVClient based on config.backend.
+    """
 
     client: Any = None
     config: Any = None
     _initialized: bool = False
 
     def initialize(self, config=None) -> None:
-        """Load the shared RWKV model."""
+        """Load the LLM model (HF or RWKV based on config.backend)."""
         if self._initialized:
             return
 
-        from minsky.llm_client import RWKVClient, RWKVConfig
+        from minsky.llm_client import LLMConfig, create_llm_client
 
-        rwkv_config = RWKVConfig()
-        if config and hasattr(config, 'model_path'):
-            rwkv_config.model_path = config.model_path
-        if config and hasattr(config, 'strategy'):
-            rwkv_config.strategy = config.strategy
-
-        self.client = RWKVClient(config=rwkv_config)
+        llm_config = config if isinstance(config, LLMConfig) else LLMConfig()
+        self.client = create_llm_client(llm_config)
         self.client.initialize()
-        self.config = config
+        self.config = llm_config
         self._initialized = True
 
+    @property
+    def use_chat_template(self) -> bool:
+        """Whether the active backend uses chat-style prompts."""
+        if self.config:
+            return self.config.use_chat_template
+        return False
+
     def __call__(self, prompt: str) -> str:
-        """Generate next-token completion from a base model prompt."""
+        """Generate text from a prompt."""
         if not self._initialized:
             self.initialize()
 
         return self.client.generate(
             prompt,
-            max_tokens=256,
-            temperature=1.0,
-            top_p=0.5,
+            max_tokens=self.config.max_tokens if self.config else 256,
+            temperature=self.config.temperature if self.config else 0.7,
+            top_p=self.config.top_p if self.config else 0.9,
             stop_tokens=["\n---", "\n\n\n", "###", "INPUT:", "Example"],
         )
 
     def save_state(self, metadata: dict | None = None) -> None:
-        """Save RWKV state and metadata to disk."""
+        """Save LLM state/metadata to disk."""
         if self._initialized and self.client:
             self.client.save_state(metadata)
 
@@ -67,6 +72,10 @@ class RWKVWrapper:
         if self._initialized and self.client:
             return self.client.saved_metadata
         return {}
+
+
+# Backward-compat alias
+RWKVWrapper = LLMWrapper
 
 
 @dataclass
@@ -170,7 +179,7 @@ class Orchestrator:
     max_cycles: int = 5
 
     # Model wrappers (provide llm_fn and edit_fn interfaces)
-    rwkv: RWKVWrapper = field(default_factory=RWKVWrapper)
+    rwkv: LLMWrapper = field(default_factory=LLMWrapper)
     t5_edit: T5EditWrapper = field(default_factory=T5EditWrapper)
     use_llm: bool = False
     use_edit: bool = False
@@ -188,8 +197,8 @@ class Orchestrator:
     judge_interval: int = 1  # Run judges every N global steps
     save_training_pairs: bool = True  # Save to data/train_data/
     training_pairs: list[TrainingPair] = field(default_factory=list)
-    # (room_type, output, context, history)
-    pending_evaluations: list[tuple[RoomType, str, str, list[tuple[str, str, str]] | None]] = field(default_factory=list)
+    # (room_type, t5_edited, raw_output, context, history)
+    pending_evaluations: list[tuple[RoomType, str, str, str, list[tuple[str, str, str]] | None]] = field(default_factory=list)
 
     # Forecast settings
     use_forecasts: bool = False
@@ -206,7 +215,7 @@ class Orchestrator:
     on_judge: Callable[[JudgeOutput], None] | None = None  # Called when judge evaluates
 
     def restore_from_saved_state(self) -> None:
-        """Restore orchestrator state (e.g. global_step) from RWKV saved metadata."""
+        """Restore orchestrator state (e.g. global_step) from LLM saved metadata."""
         meta = self.rwkv.get_saved_metadata()
         if meta.get("global_step"):
             self.current_cycle = meta["global_step"]
@@ -295,11 +304,11 @@ class Orchestrator:
             # Call the room processor (it handles prompts, LLM, parsing internally)
             if room_type == RoomType.MOTOR:
                 # Motor processor has extra action_fn parameter
-                new_state, outgoing = processor(
+                new_state, outgoing, raw_output = processor(
                     state, messages, llm_fn, edit_fn, self.action_fn
                 )
             else:
-                new_state, outgoing = processor(state, messages, llm_fn, edit_fn)
+                new_state, outgoing, raw_output = processor(state, messages, llm_fn, edit_fn)
 
             self.set_state(room_type, new_state)
 
@@ -326,7 +335,7 @@ class Orchestrator:
                 if representative:
                     history = self._extract_history(room_type)
                     self.pending_evaluations.append(
-                        (room_type, representative, new_state.current_context, history)
+                        (room_type, representative, raw_output, new_state.current_context, history)
                     )
 
         self.message_queue = next_queue
@@ -402,27 +411,31 @@ class Orchestrator:
         if not self.pending_evaluations:
             return
 
-        # Build judge inputs
+        # Build judge inputs (judge evaluates the t5_edited output)
         judge_inputs = [
             JudgeInput(
                 room_type=room_type,
-                room_output=output,
+                room_output=t5_edited,
                 context=context,
                 message_history=history,
             )
-            for room_type, output, context, history in self.pending_evaluations
+            for room_type, t5_edited, _raw, context, history in self.pending_evaluations
         ]
+
+        # Build raw_output lookup keyed by index
+        raw_outputs = [raw for _, _, raw, _, _ in self.pending_evaluations]
 
         # Run all evaluations concurrently via DeepSeek API
         judge_outputs = judge_batch(judge_inputs)
 
         # Convert to training pairs and store
-        for judge_output in judge_outputs:
+        for i, judge_output in enumerate(judge_outputs):
             # Only create training pair if counterfactual differs from original
             if judge_output.counterfactual != judge_output.original:
                 pair = TrainingPair(
-                    original=judge_output.original,
-                    edited=judge_output.counterfactual,
+                    raw=raw_outputs[i],
+                    t5_edited=judge_output.original,
+                    improved=judge_output.counterfactual,
                     task_prefix=f"edit_{judge_output.room_type.value}",
                     score=judge_output.score,
                 )
@@ -534,8 +547,9 @@ class Orchestrator:
             if actual_parts:
                 actual_events = " ".join(actual_parts)
                 pair = TrainingPair(
-                    original=forecast.raw_forecast,
-                    edited=actual_events,
+                    raw=forecast.raw_forecast,
+                    t5_edited="",
+                    improved=actual_events,
                     task_prefix="forecast_sensory",
                     context=forecast.context,
                 )
@@ -610,7 +624,7 @@ class Orchestrator:
         return "\n".join(lines)
 
     def shutdown(self) -> None:
-        """Gracefully shutdown, saving RWKV state and any remaining training pairs."""
+        """Gracefully shutdown, saving LLM state and any remaining training pairs."""
         # Flush remaining training pairs to disk
         if self.save_training_pairs and self.training_pairs:
             filepath = save_training_pairs(self.training_pairs)
@@ -619,7 +633,7 @@ class Orchestrator:
 
         if self.use_llm:
             self.rwkv.save_state({"global_step": self.current_cycle})
-            print("RWKV state saved.")
+            print("LLM state saved.")
 
 
 def run_cycle(orchestrator: Orchestrator, input_text: str | None = None) -> list[Message]:

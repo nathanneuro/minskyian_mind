@@ -132,17 +132,20 @@ def main() -> None:
     run = cfg.get("run", {})
     features = run.get("features", {})
     intervals = run.get("intervals", {})
-    rwkv_cfg = cfg.get("rwkv", {})
+    llm_cfg = cfg.get("llm", {})
     t5_cfg = cfg.get("t5", {})
+
+    model_name = llm_cfg.get("model_name", "Qwen/Qwen3-8B")
+    llm_device = llm_cfg.get("device", "cuda:0")
 
     print("Minsky Society of Mind - Demo")
     print("=" * 60)
     print(f"Config: {args.config}")
     print("Architecture:")
-    print("  GPU 0: RWKV 7B (frozen LLM)")
+    print(f"  {llm_device}: {model_name} (frozen LLM)")
     print("  GPU 1: T5Gemma 270M (learnable edit model)")
     print()
-    print("Each global step: RWKV batch → T5 batch → route outputs")
+    print("Each global step: LLM batch → T5 batch → route outputs")
     print("=" * 60)
 
     max_steps = run.get("max_steps", 100)
@@ -169,17 +172,26 @@ def main() -> None:
     use_fake_user = features.get("fake_user", True)
 
     if not use_llm:
-        print("\nRunning in stub mode (no RWKV, no T5).")
+        print("\nRunning in stub mode (no LLM, no T5).")
     else:
         print("\nLoading models...")
 
-        # Initialize RWKV
-        from minsky.llm_client import RWKVConfig
-        config = RWKVConfig()
-        if rwkv_cfg.get("strategy"):
-            config.strategy = rwkv_cfg["strategy"]
-        if rwkv_cfg.get("device"):
-            config.device = rwkv_cfg["device"]
+        # Initialize LLM
+        from minsky.llm_client import LLMConfig
+        config = LLMConfig(
+            backend=llm_cfg.get("backend", "hf"),
+            model_name=llm_cfg.get("model_name", "Qwen/Qwen3-8B"),
+            device=llm_cfg.get("device", "cuda:0"),
+            dtype=llm_cfg.get("dtype", "float16"),
+            max_tokens=llm_cfg.get("max_tokens", 256),
+            temperature=llm_cfg.get("temperature", 0.7),
+            top_p=llm_cfg.get("top_p", 0.9),
+            state_file=llm_cfg.get("state_file", "llm_state.json"),
+            use_chat_template=llm_cfg.get("use_chat_template", True),
+            strategy=llm_cfg.get("strategy", "cuda fp16"),
+            state_save_interval=llm_cfg.get("state_save_interval", 100),
+            use_cudagraph=llm_cfg.get("use_cudagraph", False),
+        )
         orchestrator.rwkv.initialize(config)
         orchestrator.use_llm = True
         orchestrator.restore_from_saved_state()
@@ -188,9 +200,9 @@ def main() -> None:
         if use_t5:
             orchestrator.t5_edit.initialize()
             orchestrator.use_edit = True
-            print("Models loaded: RWKV (GPU 0) + T5 (GPU 1)")
+            print(f"Models loaded: {model_name} ({llm_device}) + T5 (GPU 1)")
         else:
-            print("Model loaded: RWKV (GPU 0) only")
+            print(f"Model loaded: {model_name} ({llm_device}) only")
 
         if use_summarizers:
             orchestrator.use_summarizers = True
@@ -237,8 +249,9 @@ def main() -> None:
         print("=" * 60)
         for i, pair in enumerate(pairs[:5]):  # Show first 5
             print(f"\n[{i+1}] {pair.task_prefix} (score={pair.score:.2f})")
-            print(f"    Original: {pair.original[:80]}...")
-            print(f"    Edited:   {pair.edited[:80]}...")
+            print(f"    Raw:      {pair.raw[:80]}...")
+            print(f"    T5:       {pair.t5_edited[:80]}...")
+            print(f"    Improved: {pair.improved[:80]}...")
         if len(pairs) > 5:
             print(f"\n    ... and {len(pairs) - 5} more pairs")
 

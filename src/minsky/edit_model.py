@@ -2,15 +2,15 @@
 
 The edit model is a small seq2seq transformer that learns to make
 targeted edits to the outputs of frozen LLMs. It receives:
-- The original LLM output
+- The raw RWKV output
 - Context about the room/task
 - (Optional) Knowledge graph facts
 
-And produces an edited version of the output.
+And produces an improved version of the output.
 
 Training data flow:
-1. Judges generate TrainingPairs (original → counterfactual)
-2. Trainer accumulates pairs in memory
+1. Judges generate TrainingPairs with 3 stages: raw → t5_edited → improved
+2. T5 trains on raw → improved (learning to skip its own current output)
 3. After training on a batch, pairs are saved to data/used_train_data/
 """
 
@@ -131,10 +131,19 @@ class EditModel:
 
 @dataclass
 class TrainingPair:
-    """A before/after training pair for the edit model."""
+    """A 3-stage training pair for the edit model.
 
-    original: str  # Original LLM output
-    edited: str  # What it should have been (from judge)
+    Captures all stages of text transformation:
+    - raw: what RWKV produced (T5's input)
+    - t5_edited: what T5 produced (what rooms actually use)
+    - improved: what the judge says it should be (training target)
+
+    Training: T5 learns raw → improved (skipping over its current output).
+    """
+
+    raw: str  # Raw RWKV output (T5's input)
+    t5_edited: str  # What T5 produced (what rooms use)
+    improved: str  # Judge's counterfactual (training target)
     task_prefix: str  # Which room this came from
     context: str = ""  # Additional context
     score: float = 1.0  # Weight/importance of this example
@@ -147,8 +156,9 @@ class TrainingPair:
     def to_dict(self) -> dict:
         """Convert to JSON-serializable dict."""
         return {
-            "original": self.original,
-            "edited": self.edited,
+            "raw": self.raw,
+            "t5_edited": self.t5_edited,
+            "improved": self.improved,
             "task_prefix": self.task_prefix,
             "context": self.context,
             "score": self.score,
@@ -157,10 +167,11 @@ class TrainingPair:
 
     @classmethod
     def from_dict(cls, data: dict) -> "TrainingPair":
-        """Create from dict."""
+        """Create from dict. Supports old format (original/edited) for backward compat."""
         return cls(
-            original=data["original"],
-            edited=data["edited"],
+            raw=data.get("raw", data.get("original", "")),
+            t5_edited=data.get("t5_edited", ""),
+            improved=data.get("improved", data.get("edited", "")),
             task_prefix=data["task_prefix"],
             context=data.get("context", ""),
             score=data.get("score", 1.0),
@@ -288,13 +299,13 @@ class EditModelTrainer:
         batch = self.training_pairs[: self.batch_size]
         self.training_pairs = self.training_pairs[self.batch_size :]
 
-        # Format inputs
+        # Format inputs: T5 learns raw → improved
         inputs_text = []
         targets_text = []
         for pair in batch:
-            inp = format_t5_prompt(pair.original, pair.context, pair.task_prefix)
+            inp = format_t5_prompt(pair.raw, pair.context, pair.task_prefix)
             inputs_text.append(inp)
-            targets_text.append(pair.edited)
+            targets_text.append(pair.improved)
 
         # Tokenize
         inputs = self.model.processor(

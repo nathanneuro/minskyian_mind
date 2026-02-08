@@ -2,8 +2,8 @@
 # Launch Minsky Society of Mind experiment
 # Server: 2x 4090 GPUs, 500GB RAM
 
-# Set CUDA environment for RWKV JIT compilation
-# Try common CUDA installation paths
+# Set CUDA environment (needed for RWKV JIT compilation if using RWKV backend)
+# HF backend doesn't need this but it doesn't hurt
 if [ -d "/usr/local/cuda" ]; then
     export CUDA_HOME="/usr/local/cuda"
 elif [ -d "/usr/lib/cuda" ]; then
@@ -12,14 +12,10 @@ elif [ -n "$CUDA_PATH" ]; then
     export CUDA_HOME="$CUDA_PATH"
 fi
 
-# Also ensure CUDA bin and lib are in PATH
 if [ -n "$CUDA_HOME" ]; then
     export PATH="$CUDA_HOME/bin:$PATH"
     export LD_LIBRARY_PATH="$CUDA_HOME/lib64:$LD_LIBRARY_PATH"
     echo "CUDA_HOME set to: $CUDA_HOME"
-else
-    echo "WARNING: Could not find CUDA installation. RWKV JIT may fail."
-    echo "Set CUDA_HOME manually if needed."
 fi
 
 echo "====================================================================="
@@ -33,24 +29,42 @@ mkdir -p logs data outputs models
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 LOGFILE="logs/experiment_${TIMESTAMP}.log"
 
-# Check if RWKV model exists, download both models if needed
-MODEL_DIR="data/models"
-if ! ls "$MODEL_DIR"/*.pth 1> /dev/null 2>&1; then
-    echo ""
-    echo "Downloading models (RWKV 7.2B + T5Gemma)..."
-    uv run python scripts/download_model.py --model g1d-7.2b
-else
-    echo "RWKV model found in $MODEL_DIR"
-fi
-
 # Optional --config argument (defaults to config.toml)
 CONFIG="${1:-config.toml}"
+
+# Read backend and model name from config (best-effort)
+BACKEND=$(python3 -c "
+import tomllib
+with open('$CONFIG', 'rb') as f:
+    cfg = tomllib.load(f)
+print(cfg.get('llm', {}).get('backend', 'hf'))
+" 2>/dev/null || echo "hf")
+
+MODEL_NAME=$(python3 -c "
+import tomllib
+with open('$CONFIG', 'rb') as f:
+    cfg = tomllib.load(f)
+print(cfg.get('llm', {}).get('model_name', 'Qwen/Qwen3-8B'))
+" 2>/dev/null || echo "Qwen/Qwen3-8B")
+
+# If RWKV backend, check model exists
+if [ "$BACKEND" = "rwkv" ]; then
+    MODEL_DIR="data/models"
+    if ! ls "$MODEL_DIR"/*.pth 1> /dev/null 2>&1; then
+        echo ""
+        echo "Downloading RWKV model..."
+        uv run python scripts/download_model.py --model g1d-7.2b
+    else
+        echo "RWKV model found in $MODEL_DIR"
+    fi
+fi
 
 echo ""
 echo "Configuration:"
 echo "  - Config file: $CONFIG"
-echo "  - Model: RWKV7-G1 7.2B (14.4 GB)"
-echo "  - GPU 0: RWKV inference"
+echo "  - Backend: $BACKEND"
+echo "  - Model: $MODEL_NAME"
+echo "  - GPU 0: LLM inference"
 echo "  - GPU 1: T5 edit model"
 echo "  - Log file: $LOGFILE"
 echo ""
