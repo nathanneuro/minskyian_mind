@@ -1,13 +1,16 @@
 """LLM client for the Society of Mind architecture.
 
-Supports two backends (selected via config.toml [llm] backend):
+Supports three backends (selected via config.toml [llm] backend):
 
 - "hf": HuggingFace transformers (e.g. Qwen3-8B). Uses apply_chat_template()
   for chat-tuned models, or raw prompts for base models.
 - "rwkv": Official rwkv pip package (v0.8.31+) with CUDAGraph acceleration
   and persistent KV state.
+- "api": Any OpenAI-compatible API (OpenAI, Anthropic via proxy, DeepSeek,
+  etc.). No local GPU needed. Useful for warm-starting T5 with high-quality
+  training data before switching to local models.
 
-Both backends expose the same interface: initialize(), generate(),
+All backends expose the same interface: initialize(), generate(),
 save_state(), saved_metadata.
 """
 
@@ -32,8 +35,8 @@ STATE_DIR = DATA_DIR / "state"
 class LLMConfig:
     """Configuration for all LLM backends."""
 
-    backend: str = "hf"                    # "hf" or "rwkv"
-    model_name: str = "Qwen/Qwen3-8B"     # HF model id, or RWKV .pth path
+    backend: str = "hf"                    # "hf", "rwkv", or "api"
+    model_name: str = "Qwen/Qwen3-8B"     # HF model id, RWKV .pth path, or API model id
     device: str = "cuda:0"
     dtype: str = "float16"
     max_tokens: int = 256
@@ -46,6 +49,10 @@ class LLMConfig:
     strategy: str = "cuda fp16"
     state_save_interval: int = 100
     use_cudagraph: bool = False
+
+    # API-specific
+    api_base_url: str = ""                 # OpenAI-compatible base URL
+    api_key_env: str = ""                  # env var name holding the API key
 
 
 # Backward-compat alias
@@ -571,17 +578,147 @@ class RWKVClient:
 
 
 # ---------------------------------------------------------------------------
+# OpenAI-compatible API backend
+# ---------------------------------------------------------------------------
+
+@dataclass
+class APIClient:
+    """Client for OpenAI-compatible chat APIs.
+
+    No local GPU required. Useful for warm-starting T5 with high-quality
+    training data from frontier models before switching to local inference.
+
+    Always operates in chat mode (use_chat_template=True).
+    """
+
+    config: LLMConfig = field(default_factory=LLMConfig)
+    _client: Any = None
+    _initialized: bool = False
+
+    generation_count: int = 0
+    saved_metadata: dict = field(default_factory=dict)
+
+    def initialize(self) -> None:
+        """Set up the OpenAI client."""
+        if self._initialized:
+            return
+
+        import os
+        from dotenv import load_dotenv
+        from openai import OpenAI
+
+        load_dotenv()
+        api_key = os.environ.get(self.config.api_key_env, "") if self.config.api_key_env else ""
+        if not api_key:
+            raise ValueError(
+                f"API key not found. Set the {self.config.api_key_env!r} "
+                f"environment variable (or add it to .env)."
+            )
+
+        kwargs: dict[str, Any] = {"api_key": api_key}
+        if self.config.api_base_url:
+            kwargs["base_url"] = self.config.api_base_url
+
+        self._client = OpenAI(**kwargs)
+
+        self._load_metadata()
+        atexit.register(self.save_state)
+
+        self._initialized = True
+        base = self.config.api_base_url or "https://api.openai.com/v1"
+        print(f"API client ready: model={self.config.model_name}, base_url={base}")
+
+    def _get_state_path(self) -> Path:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        return STATE_DIR / self.config.state_file
+
+    def _load_metadata(self) -> None:
+        state_path = self._get_state_path()
+        if state_path.exists():
+            try:
+                data = json.loads(state_path.read_text())
+                self.generation_count = data.get("generation_count", 0)
+                self.saved_metadata = data.get("metadata", {})
+                print(f"Loaded metadata from {state_path}")
+                print(f"  Resuming from generation {self.generation_count}")
+            except Exception as e:
+                print(f"Failed to load metadata: {e}")
+                self.generation_count = 0
+                self.saved_metadata = {}
+        else:
+            self.generation_count = 0
+            self.saved_metadata = {}
+
+    def save_state(self, metadata: dict | None = None) -> None:
+        if not self._initialized:
+            return
+        if metadata:
+            self.saved_metadata.update(metadata)
+        state_path = self._get_state_path()
+        try:
+            data = {
+                "generation_count": self.generation_count,
+                "metadata": self.saved_metadata,
+            }
+            state_path.write_text(json.dumps(data, indent=2))
+        except Exception as e:
+            print(f"Failed to save metadata: {e}")
+
+    def generate(
+        self,
+        prompt: str,
+        max_tokens: int = 256,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        stop_tokens: list[str] | None = None,
+    ) -> str:
+        """Generate text via the API.
+
+        The prompt is wrapped as a user message in the chat completions
+        format, matching the behaviour of HFClient with use_chat_template=True.
+        """
+        if not self._initialized:
+            self.initialize()
+
+        try:
+            resp = self._client.chat.completions.create(
+                model=self.config.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+            )
+            text = resp.choices[0].message.content or ""
+        except Exception as e:
+            print(f"API generation error: {e}")
+            text = f"[API error: {e}]"
+
+        # Apply stop-token truncation to match local backend behaviour
+        stop_tokens = stop_tokens or ["\n\n", "User:", "Human:", "---"]
+        for stop in stop_tokens:
+            if stop in text:
+                text = text.split(stop)[0].strip()
+
+        self.generation_count += 1
+        return text.strip()
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
-def create_llm_client(config: LLMConfig) -> HFClient | RWKVClient:
+def create_llm_client(config: LLMConfig) -> HFClient | RWKVClient | APIClient:
     """Create the appropriate LLM client based on config.backend."""
     if config.backend == "rwkv":
         return RWKVClient(config=config)
     elif config.backend == "hf":
         return HFClient(config=config)
+    elif config.backend == "api":
+        # API models are always chat-style
+        config.use_chat_template = True
+        return APIClient(config=config)
     else:
-        raise ValueError(f"Unknown LLM backend: {config.backend!r}. Use 'hf' or 'rwkv'.")
+        raise ValueError(f"Unknown LLM backend: {config.backend!r}. Use 'hf', 'rwkv', or 'api'.")
 
 
 # Backward-compat alias

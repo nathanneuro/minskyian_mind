@@ -37,6 +37,16 @@ use_chat_template = true
 # state_file = "rwkv_state.pt"
 # use_chat_template = false
 
+# To use an API model (no local GPU needed for the frozen LLM):
+# [llm]
+# backend = "api"
+# model_name = "gpt-4o"          # or "deepseek-chat", "claude-sonnet-4-5-20250929", etc.
+# max_tokens = 256
+# temperature = 0.7
+# top_p = 0.9
+# api_base_url = ""              # leave empty for OpenAI, or set for other providers
+# api_key_env = "OPENAI_API_KEY" # env var name holding the API key
+
 [t5]
 device = "cuda:1"
 max_input_length = 512
