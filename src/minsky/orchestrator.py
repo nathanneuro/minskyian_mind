@@ -355,9 +355,11 @@ class Orchestrator:
             self._resolve_forecasts()
             self._generate_forecast()
 
-        # Fake user: respond to TO_EXTERNAL messages
-        if self.use_fake_user and external_outputs:
-            self._run_fake_user(external_outputs)
+        # Fake user: respond to each TO_EXTERNAL message individually
+        # to ensure strict alternation (assistant → user → assistant → …)
+        if self.use_fake_user:
+            for ext_msg in external_outputs:
+                self._run_fake_user(ext_msg)
 
         if self.on_cycle_end:
             self.on_cycle_end(self.current_cycle - 1, external_outputs)
@@ -455,17 +457,15 @@ class Orchestrator:
             print(f"Saved {len(self.training_pairs)} training pairs to {filepath}")
             self.training_pairs = []
 
-    def _run_fake_user(self, external_outputs: list[Message]) -> None:
-        """Generate a simulated user response to TO_EXTERNAL messages.
+    def _run_fake_user(self, external_msg: Message) -> None:
+        """Generate a simulated user response to a single TO_EXTERNAL message.
 
+        Called once per external message to ensure strict alternation.
         Uses the judge model (DeepSeek) to simulate a curious user.
         Injects the response as a new perception into the next cycle.
         """
-        # Combine all external outputs this cycle
-        assistant_text = " ".join(
-            msg.content for msg in external_outputs if msg.content
-        )
-        if not assistant_text.strip():
+        assistant_text = external_msg.content
+        if not assistant_text or not assistant_text.strip():
             return
 
         # Build brief conversation context from recent external messages
