@@ -106,6 +106,7 @@ def main() -> None:
     parser.add_argument("--judge-interval", type=int, default=1, help="Run judges every N steps")
     parser.add_argument("--no-judges", action="store_true", help="Disable judges")
     parser.add_argument("--no-forecasts", action="store_true", help="Disable sensory forecasts")
+    parser.add_argument("--no-fake-user", action="store_true", help="Disable simulated user (for manual testing)")
     parser.add_argument("--prompt", type=str, default=None, help="Custom prompt")
     args = parser.parse_args()
 
@@ -157,12 +158,16 @@ def main() -> None:
             orchestrator.use_judges = True
         if not args.no_forecasts:
             orchestrator.use_forecasts = True
+        if not args.no_fake_user:
+            orchestrator.use_fake_user = True
 
         print(f"Summarizers enabled (every {args.summarizer_interval} steps)")
         if orchestrator.use_judges:
             print(f"Judges enabled (every {args.judge_interval} steps)")
         if orchestrator.use_forecasts:
             print("Sensory forecasts enabled")
+        if orchestrator.use_fake_user:
+            print("Fake user enabled (use --no-fake-user for manual testing)")
 
     # Run with a sample input
     if args.prompt:

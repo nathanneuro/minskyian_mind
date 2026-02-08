@@ -344,6 +344,81 @@ def summarize_batch(prompts: list[str]) -> list[str]:
         return asyncio.run(_summarize_batch_async(prompts))
 
 
+# =============================================================================
+# Fake User via Judge Model
+# =============================================================================
+
+FAKE_USER_SYSTEM_PROMPT = """You are a researcher probing the capabilities of a novel AI cognitive architecture.
+Your goal is to test its ability to reason, use tools, and synthesize information.
+You are especially interested in machine consciousness, AI self-awareness, and theories of mind.
+
+Keep your replies short (1-2 sentences). You should:
+- Encourage the system to do web research on consciousness, sentience, and AI cognition
+- Ask probing questions about its own architecture and cognitive processes
+- Request it to compare different theories of machine consciousness (IIT, GWT, higher-order theories)
+- Push it to search for recent papers and developments in AI consciousness research
+- Ask it to reflect on what its internal states might represent
+- Challenge it with thought experiments (Chinese Room, Mary's Room, philosophical zombies)
+
+Be direct and intellectually curious. Do NOT be generic or overly agreeable."""
+
+
+async def _fake_user_one(client: AsyncOpenAI, assistant_message: str, conversation_context: str) -> str:
+    """Generate a single fake user response."""
+    try:
+        resp = await client.chat.completions.create(
+            model=JUDGE_MODEL,
+            messages=[
+                {"role": "system", "content": FAKE_USER_SYSTEM_PROMPT},
+                {"role": "user", "content": f"Conversation so far:\n{conversation_context}\n\nAssistant's latest response:\n{assistant_message}\n\nReply as the user:"},
+            ],
+            max_tokens=150,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"Fake user API error: {e}")
+        return ""
+
+
+async def _fake_user_async(assistant_message: str, conversation_context: str) -> str:
+    """Generate a fake user response via DeepSeek API."""
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    api_key = os.environ.get("INF_API_KEY", "")
+    if not api_key:
+        print("ERROR: INF_API_KEY not set in .env")
+        return ""
+
+    client = AsyncOpenAI(base_url=JUDGE_BASE_URL, api_key=api_key)
+    return await _fake_user_one(client, assistant_message, conversation_context)
+
+
+def fake_user_respond(assistant_message: str, conversation_context: str = "") -> str:
+    """Generate a simulated user response to an assistant message.
+
+    Args:
+        assistant_message: What the assistant said (TO_EXTERNAL content).
+        conversation_context: Recent conversation for context.
+
+    Returns:
+        Simulated user reply, or empty string on failure.
+    """
+    if not assistant_message.strip():
+        return ""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, _fake_user_async(assistant_message, conversation_context)).result()
+    else:
+        return asyncio.run(_fake_user_async(assistant_message, conversation_context))
+
+
 # Keep old functions for backward compat with tests
 def build_judge_batch(inputs: list[JudgeInput]) -> list[str]:
     """Build prompts for a batch of judge evaluations."""

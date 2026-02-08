@@ -11,7 +11,7 @@ from typing import Callable, Any
 
 from minsky.types import Message, RoomType, RoomState, MessageType
 from minsky.rooms import create_room_state, ROOM_PROCESSORS
-from minsky.judges import JudgeInput, JudgeOutput, judge_batch, summarize_batch
+from minsky.judges import JudgeInput, JudgeOutput, judge_batch, summarize_batch, fake_user_respond
 from minsky.edit_model import TrainingPair, save_training_pairs
 from minsky.prompts.summarizer import SUMMARIZER_PROMPT_TEMPLATE
 from minsky.prompts.forecast import FORECAST_PROMPT_TEMPLATE
@@ -195,6 +195,9 @@ class Orchestrator:
     use_forecasts: bool = False
     pending_forecasts: list[PendingForecast] = field(default_factory=list)
 
+    # Fake user: DeepSeek simulates user responses to TO_EXTERNAL messages
+    use_fake_user: bool = False
+
     # Callbacks for visualization/debugging
     on_message: Callable[[Message], None] | None = None
     on_cycle_start: Callable[[int], None] | None = None
@@ -342,6 +345,10 @@ class Orchestrator:
             self._resolve_forecasts()
             self._generate_forecast()
 
+        # Fake user: respond to TO_EXTERNAL messages
+        if self.use_fake_user and external_outputs:
+            self._run_fake_user(external_outputs)
+
         if self.on_cycle_end:
             self.on_cycle_end(self.current_cycle - 1, external_outputs)
 
@@ -433,6 +440,40 @@ class Orchestrator:
             filepath = save_training_pairs(self.training_pairs)
             print(f"Saved {len(self.training_pairs)} training pairs to {filepath}")
             self.training_pairs = []
+
+    def _run_fake_user(self, external_outputs: list[Message]) -> None:
+        """Generate a simulated user response to TO_EXTERNAL messages.
+
+        Uses the judge model (DeepSeek) to simulate a curious user.
+        Injects the response as a new perception into the next cycle.
+        """
+        # Combine all external outputs this cycle
+        assistant_text = " ".join(
+            msg.content for msg in external_outputs if msg.content
+        )
+        if not assistant_text.strip():
+            return
+
+        # Build brief conversation context from recent external messages
+        recent_external = [
+            msg for msg in self.message_log[-20:]
+            if msg.target == RoomType.EXTERNAL or msg.source == RoomType.EXTERNAL
+        ]
+        context_parts = []
+        for msg in recent_external[-6:]:
+            role = "User" if msg.source == RoomType.EXTERNAL else "Assistant"
+            context_parts.append(f"{role}: {msg.content[:150]}")
+        conversation_context = "\n".join(context_parts)
+
+        user_reply = fake_user_respond(assistant_text, conversation_context)
+        if user_reply:
+            print(f"  FAKE USER: {user_reply[:150]}")
+            self.inject_message(Message(
+                content=user_reply,
+                source=RoomType.EXTERNAL,
+                target=RoomType.SENSORY,
+                message_type=MessageType.PERCEPTION,
+            ))
 
     def _generate_forecast(self) -> None:
         """Generate a sensory forecast using RWKV (raw, no T5 edit).
@@ -552,10 +593,12 @@ class Orchestrator:
             outputs = self.run_cycle()
             all_outputs.extend(outputs)
 
-            if outputs and not self.message_queue:
-                break
-            if not self.message_queue:
-                break
+            # With fake_user, the loop keeps going until max_cycles
+            if not self.use_fake_user:
+                if outputs and not self.message_queue:
+                    break
+                if not self.message_queue:
+                    break
 
         return all_outputs
 
