@@ -118,11 +118,11 @@ def download_t5() -> Path:
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Download and save to local path
+    # Download and save to local path (float32 for T5)
     processor = AutoProcessor.from_pretrained(T5_MODEL)
     model = AutoModelForSeq2SeqLM.from_pretrained(
         T5_MODEL,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=torch.float32,
     )
 
     # Save locally

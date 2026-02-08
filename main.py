@@ -10,14 +10,54 @@ Each "global step" consists of:
 2. Batch all outputs through T5 edit model (GPU 1)
 3. Route edited outputs to target rooms
 
-Run with: uv run python main.py
-Run with RWKV+T5: uv run python main.py --use-models
+Run with: uv run python main.py          # RWKV + T5 (default)
+Stub mode: uv run python main.py --no-llm # No models
+RWKV only: uv run python main.py --no-t5  # Skip T5
 """
 
 import argparse
+import sys
+from datetime import datetime
+from pathlib import Path
 
 from minsky.orchestrator import Orchestrator
 from minsky.types import Message
+
+LOG_DIR = Path(__file__).parent / "outputs" / "logs"
+
+
+class TeeStream:
+    """Write to both a file and the original stream."""
+
+    def __init__(self, stream, log_file):
+        self.stream = stream
+        self.log_file = log_file
+
+    def write(self, data):
+        self.stream.write(data)
+        self.log_file.write(data)
+        self.log_file.flush()
+
+    def flush(self):
+        self.stream.flush()
+        self.log_file.flush()
+
+    def fileno(self):
+        return self.stream.fileno()
+
+    def isatty(self):
+        return self.stream.isatty()
+
+
+def setup_logging() -> Path:
+    """Tee stdout and stderr to a timestamped log file in outputs/logs/."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = LOG_DIR / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    log_file = open(log_path, "w")
+    sys.stdout = TeeStream(sys.__stdout__, log_file)
+    sys.stderr = TeeStream(sys.__stderr__, log_file)
+    print(f"Logging to {log_path}")
+    return log_path
 
 
 def print_message(msg: Message) -> None:
@@ -55,14 +95,17 @@ def print_judge(judge_output) -> None:
 
 def main() -> None:
     """Run a demo of the Society of Mind architecture."""
+    setup_logging()
+
     parser = argparse.ArgumentParser(description="Minsky Society of Mind")
-    parser.add_argument("--no-llm", action="store_true", help="Run in stub mode (no RWKV)")
-    parser.add_argument("--use-t5", action="store_true", help="Also use T5 edit model")
+    parser.add_argument("--no-llm", action="store_true", help="Run in stub mode (no RWKV, no T5)")
+    parser.add_argument("--no-t5", action="store_true", help="Disable T5 edit model (RWKV only)")
     parser.add_argument("--rwkv-path", type=str, default=None, help="Path to RWKV model")
     parser.add_argument("--max-steps", type=int, default=5, help="Maximum global steps")
     parser.add_argument("--summarizer-interval", type=int, default=10, help="Run summarizers every N steps")
     parser.add_argument("--judge-interval", type=int, default=1, help="Run judges every N steps")
     parser.add_argument("--no-judges", action="store_true", help="Disable judges")
+    parser.add_argument("--no-forecasts", action="store_true", help="Disable sensory forecasts")
     parser.add_argument("--prompt", type=str, default=None, help="Custom prompt")
     args = parser.parse_args()
 
@@ -88,33 +131,38 @@ def main() -> None:
     )
 
     if args.no_llm:
-        print("\nRunning in stub mode (no LLM). Remove --no-llm to use RWKV.")
+        print("\nRunning in stub mode (no RWKV, no T5). Remove --no-llm to use models.")
     else:
-        print("\nLoading RWKV model...")
+        print("\nLoading models...")
 
         # Initialize RWKV
         from minsky.llm_client import RWKVConfig
         config = RWKVConfig()
         if args.rwkv_path:
             config.model_path = args.rwkv_path
-        orchestrator.batched_llm.initialize(config)
+        orchestrator.rwkv.initialize(config)
         orchestrator.use_llm = True
+        orchestrator.restore_from_saved_state()
 
-        # Initialize T5 if requested
-        if args.use_t5:
-            orchestrator.batched_edit.initialize()
+        # Initialize T5 (default on, use --no-t5 to disable)
+        if not args.no_t5:
+            orchestrator.t5_edit.initialize()
             orchestrator.use_edit = True
             print("Models loaded: RWKV (GPU 0) + T5 (GPU 1)")
         else:
-            print("Model loaded: RWKV (GPU 0)")
+            print("Model loaded: RWKV (GPU 0) only")
 
         orchestrator.use_summarizers = True
         if not args.no_judges:
             orchestrator.use_judges = True
+        if not args.no_forecasts:
+            orchestrator.use_forecasts = True
 
         print(f"Summarizers enabled (every {args.summarizer_interval} steps)")
         if orchestrator.use_judges:
             print(f"Judges enabled (every {args.judge_interval} steps)")
+        if orchestrator.use_forecasts:
+            print("Sensory forecasts enabled")
 
     # Run with a sample input
     if args.prompt:
@@ -151,6 +199,19 @@ def main() -> None:
         if len(pairs) > 5:
             print(f"\n    ... and {len(pairs) - 5} more pairs")
 
+    # Save state before exiting
+    orchestrator.shutdown()
+
 
 if __name__ == "__main__":
+    import signal
+    import sys
+
+    def signal_handler(sig, frame):
+        print("\nReceived interrupt signal. Saving state and exiting...")
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
     main()

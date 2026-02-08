@@ -19,10 +19,69 @@ from pathlib import Path
 import torch
 import numpy as np
 
+# Set CUDA_HOME if not already set (required for RWKV JIT compilation)
+if "CUDA_HOME" not in os.environ:
+    import subprocess
+    import shutil
+
+    # Try to find nvcc
+    nvcc_path = shutil.which("nvcc")
+    if nvcc_path:
+        cuda_home = str(Path(nvcc_path).parent.parent)
+        os.environ["CUDA_HOME"] = cuda_home
+        print(f"Set CUDA_HOME to: {cuda_home} (from nvcc)")
+    else:
+        # Check common paths
+        for cuda_path in ["/usr/local/cuda", "/usr/lib/cuda", "/opt/cuda"]:
+            if os.path.isdir(cuda_path) and os.path.exists(f"{cuda_path}/bin/nvcc"):
+                os.environ["CUDA_HOME"] = cuda_path
+                print(f"Set CUDA_HOME to: {cuda_path}")
+                break
+        else:
+            # Try to find it with subprocess
+            try:
+                result = subprocess.run(
+                    ["find", "/usr", "-name", "nvcc", "-type", "f"],
+                    capture_output=True, text=True, timeout=10
+                )
+                if result.stdout.strip():
+                    nvcc_found = result.stdout.strip().split('\n')[0]
+                    cuda_home = str(Path(nvcc_found).parent.parent)
+                    os.environ["CUDA_HOME"] = cuda_home
+                    print(f"Set CUDA_HOME to: {cuda_home} (found via search)")
+            except:
+                pass
+
+            if "CUDA_HOME" not in os.environ:
+                print("WARNING: CUDA toolkit (nvcc) not found.")
+                print("Install with: sudo apt install nvidia-cuda-toolkit")
+                print("Or set CUDA_HOME manually.")
+
 # Set RWKV environment before importing
 os.environ["RWKV_V7_ON"] = "1"
 os.environ["RWKV_JIT_ON"] = "1"
-os.environ["RWKV_CUDA_ON"] = "1"
+
+# Check if CUDA JIT compilation will work (need compatible CUDA toolkit)
+# For 4090 (compute_89), need CUDA 12.x
+cuda_on = os.environ.get("RWKV_CUDA_ON", "1")
+if cuda_on == "1":
+    try:
+        # Test if nvcc supports compute_89
+        import subprocess
+        result = subprocess.run(
+            ["nvcc", "--list-gpu-arch"],
+            capture_output=True, text=True, timeout=5
+        )
+        if "compute_89" not in result.stdout and "sm_89" not in result.stdout:
+            print("WARNING: CUDA toolkit doesn't support compute_89 (4090/Ada).")
+            print("Disabling CUDA JIT. Install CUDA 12.x for GPU acceleration.")
+            cuda_on = "0"
+    except Exception:
+        # nvcc not available or failed
+        cuda_on = "0"
+        print("WARNING: CUDA JIT disabled (nvcc check failed).")
+
+os.environ["RWKV_CUDA_ON"] = cuda_on
 
 from rwkv.model import RWKV
 from rwkv.utils import PIPELINE
@@ -42,6 +101,7 @@ class RWKVConfig:
     device: str = "cuda:0"
     state_save_interval: int = 100  # Save state every N generations
     state_file: str = "rwkv_state.pt"  # State filename
+    use_cudagraph: bool = False  # CUDAGraph can fail on some setups
 
 
 @dataclass
@@ -63,9 +123,10 @@ class RWKVClient:
     # Persistent state
     state: list = field(default_factory=list)
     generation_count: int = 0
+    saved_metadata: dict = field(default_factory=dict)  # Metadata loaded from state file
 
-    # CUDAGraph components for fast inference
-    _use_cudagraph: bool = True
+    # CUDAGraph components for fast inference (can be disabled in config)
+    _use_cudagraph: bool = False  # Default off - enable via config if working
     _cudagraph: Any = None
     _static_input: Any = None
     _static_state_in: list = field(default_factory=list)
@@ -90,11 +151,16 @@ class RWKVClient:
                 "No model path specified. Run: uv run python scripts/download_model.py"
             )
 
-        print(f"Loading RWKV model: {self.config.model_path}")
+        # RWKV library expects path WITHOUT .pth extension (it adds it internally)
+        model_path = self.config.model_path
+        if model_path.endswith(".pth"):
+            model_path = model_path[:-4]
+
+        print(f"Loading RWKV model: {model_path}")
         print(f"Strategy: {self.config.strategy}")
 
         self.model = RWKV(
-            model=self.config.model_path,
+            model=model_path,
             strategy=self.config.strategy,
         )
         self.pipeline = PIPELINE(self.model, "rwkv_vocab_v20230424")
@@ -102,9 +168,18 @@ class RWKVClient:
         # Load or initialize state
         self._load_state()
 
-        # Set up CUDAGraph for fast inference
+        # Set up CUDAGraph for fast inference (if enabled and requested)
+        self._use_cudagraph = self.config.use_cudagraph
         if self._use_cudagraph:
-            self._setup_cudagraph()
+            try:
+                self._setup_cudagraph()
+                print("CUDAGraph initialized for fast inference.")
+            except Exception as e:
+                print(f"CUDAGraph setup failed: {e}")
+                print("Falling back to standard inference (slower but reliable).")
+                self._use_cudagraph = False
+        else:
+            print("Using standard inference (CUDAGraph disabled).")
 
         # Register shutdown handler to save state
         atexit.register(self.save_state)
@@ -117,31 +192,49 @@ class RWKVClient:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         return STATE_DIR / self.config.state_file
 
+    def _move_state_to_device(self, state: list) -> list:
+        """Move all state tensors to the model's device (cuda:0)."""
+        device = self.config.device
+        return [s.to(device) if hasattr(s, 'to') else s for s in state]
+
     def _load_state(self) -> None:
-        """Load state from disk or initialize fresh."""
+        """Load state and metadata from disk or initialize fresh."""
         state_path = self._get_state_path()
 
         if state_path.exists():
             try:
                 checkpoint = torch.load(state_path, weights_only=False)
-                self.state = checkpoint["state"]
+                self.state = self._move_state_to_device(checkpoint["state"])
                 self.generation_count = checkpoint.get("generation_count", 0)
+                self.saved_metadata = checkpoint.get("metadata", {})
                 print(f"Loaded RWKV state from {state_path}")
                 print(f"  Resuming from generation {self.generation_count}")
+                if self.saved_metadata:
+                    print(f"  Metadata: {self.saved_metadata}")
             except Exception as e:
                 print(f"Failed to load state: {e}")
                 print("Starting with fresh state.")
-                self.state = self.model.generate_zero_state()
+                self.state = self._move_state_to_device(self.model.generate_zero_state())
                 self.generation_count = 0
+                self.saved_metadata = {}
         else:
             print("No saved state found. Starting fresh.")
-            self.state = self.model.generate_zero_state()
+            self.state = self._move_state_to_device(self.model.generate_zero_state())
             self.generation_count = 0
+            self.saved_metadata = {}
 
-    def save_state(self) -> None:
-        """Save state to disk."""
+    def save_state(self, metadata: dict | None = None) -> None:
+        """Save state and metadata to disk.
+
+        Args:
+            metadata: Optional dict of metadata to persist (e.g. global_step).
+                      Merged with any previously loaded metadata.
+        """
         if not self._initialized or not self.state:
             return
+
+        if metadata:
+            self.saved_metadata.update(metadata)
 
         state_path = self._get_state_path()
         try:
@@ -150,14 +243,15 @@ class RWKVClient:
             torch.save({
                 "state": state_cpu,
                 "generation_count": self.generation_count,
+                "metadata": self.saved_metadata,
             }, state_path)
-            print(f"Saved RWKV state to {state_path} (gen {self.generation_count})")
+            print(f"Saved RWKV state to {state_path} (gen {self.generation_count}, metadata={self.saved_metadata})")
         except Exception as e:
             print(f"Failed to save state: {e}")
 
     def reset_state(self) -> None:
         """Reset state to fresh (loses all context)."""
-        self.state = self.model.generate_zero_state()
+        self.state = self._move_state_to_device(self.model.generate_zero_state())
         self.generation_count = 0
         print("RWKV state reset.")
 
@@ -269,8 +363,8 @@ class RWKVClient:
                             for n in range(len(self.state)):
                                 self.state[n].copy_(self._static_state_in[n])
                             return full_text.split(stop)[0].strip()
-            except:
-                pass
+            except (UnicodeDecodeError, ValueError, RuntimeError):
+                pass  # Incomplete token sequence, continue generating
 
             # Fast forward using CUDAGraph
             self._static_input.copy_(self.model.z["emb.weight"][token])

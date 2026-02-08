@@ -18,9 +18,9 @@ Each global step:
 """
 
 from minsky.types import Message, RoomType, MessageType, RoomState
-from minsky.orchestrator import Orchestrator, BatchedLLM, BatchedEditModel
+from minsky.orchestrator import Orchestrator, RWKVWrapper, T5EditWrapper
 from minsky.config import RWKVConfig, EditModelConfig, SummarizerConfig, OrchestratorConfig
-from minsky.judges import JudgeInput, JudgeOutput, JUDGE_PROMPTS
+from minsky.judges import JudgeInput, JudgeOutput
 from minsky.edit_model import EditModel, TrainingPair, EditModelTrainer
 from minsky.tools import (
     web_search,
@@ -37,6 +37,17 @@ from minsky.tools import (
     ToolResult,
 )
 from minsky.memory import Memory, MemoryStore, MemoryState, get_memory_store
+from minsky.rooms import ROOM_PROCESSORS, sensory_process, planning_process, motor_process
+from minsky.prompts import (
+    SENSORY_PROMPT_TEMPLATE,
+    PLANNING_PROMPT_TEMPLATE,
+    MOTOR_PROMPT_TEMPLATE,
+    ARCHITECTURE_PREAMBLE,
+    JUDGE_PROMPTS,
+    FORECAST_PROMPT_TEMPLATE,
+    SUMMARIZER_PROMPT_TEMPLATE,
+    format_t5_prompt,
+)
 
 __all__ = [
     # Types
@@ -46,8 +57,13 @@ __all__ = [
     "RoomState",
     # Orchestrator
     "Orchestrator",
-    "BatchedLLM",
-    "BatchedEditModel",
+    "RWKVWrapper",
+    "T5EditWrapper",
+    # Room processors
+    "ROOM_PROCESSORS",
+    "sensory_process",
+    "planning_process",
+    "motor_process",
     # Config
     "RWKVConfig",
     "EditModelConfig",
@@ -71,4 +87,12 @@ __all__ = [
     "memory_promote",
     "memory_demote",
     "memory_stats",
+    # Prompts
+    "SENSORY_PROMPT_TEMPLATE",
+    "PLANNING_PROMPT_TEMPLATE",
+    "MOTOR_PROMPT_TEMPLATE",
+    "ARCHITECTURE_PREAMBLE",
+    "FORECAST_PROMPT_TEMPLATE",
+    "SUMMARIZER_PROMPT_TEMPLATE",
+    "format_t5_prompt",
 ]

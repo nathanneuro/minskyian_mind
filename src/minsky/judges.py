@@ -1,107 +1,61 @@
 """Judges for evaluating room outputs and generating training signals.
 
 Each room has a dedicated judge with a specific evaluation rubric.
-Judges run through RWKV (same as rooms) and output:
+Judges use DeepSeek-V3.2 via OpenAI-compatible API and output:
 1. A score (0-1)
 2. A counterfactual: "what should have been done instead"
 
 The counterfactual becomes the training target for the T5 edit model.
 """
 
+import asyncio
+import os
 from dataclasses import dataclass
-from enum import Enum
+
+from openai import AsyncOpenAI
 
 from minsky.types import RoomType
+from minsky.prompts.judges import JUDGE_PROMPTS
+
+# Judge API configuration
+JUDGE_MODEL = "QuantTrio/DeepSeek-V3.2-AWQ"
+JUDGE_BASE_URL = "https://api.infinity.inc/v1"
+JUDGE_MAX_TOKENS = 1000
 
 
 # =============================================================================
-# Judge System Prompts
+# Message History Formatting
 # =============================================================================
 
-SENSORY_JUDGE_PROMPT = """You are evaluating the Sensory module of a cognitive system.
+def format_message_history(
+    history: list[tuple[str, str, str]],
+    max_chars: int = 1500,
+) -> str:
+    """Format message history tuples into a compact string for judge context.
 
-The Sensory module's goals are:
-1. Accurately perceive and describe relevant details from the world
-2. Successfully direct attention according to Planning's requests
-3. Provide useful context without unnecessary noise
-4. Predict what information will be needed next
+    Args:
+        history: List of (source, message_type, content) tuples.
+        max_chars: Maximum total characters for the formatted output.
 
-Evaluation criteria:
-- Relevance: Did it focus on what was asked?
-- Accuracy: Are the observations correct and specific?
-- Completeness: Did it capture the key details?
-- Conciseness: Did it avoid irrelevant information?
+    Returns:
+        Formatted history string, truncated to max_chars.
+    """
+    if not history:
+        return ""
 
-You will be given:
-- The attention request from Planning
-- The Sensory module's response
-- Any available ground truth or context
+    lines = []
+    total = 0
+    for source, msg_type, content in history:
+        line = f"[{source}->{msg_type}] {content}"
+        if total + len(line) + 1 > max_chars:
+            remaining = max_chars - total - 4  # room for "..."
+            if remaining > 20:
+                lines.append(line[:remaining] + "...")
+            break
+        lines.append(line)
+        total += len(line) + 1  # +1 for newline
 
-Output format (you MUST follow this exactly):
-SCORE: [0.0-1.0]
-REASONING: [1-2 sentences explaining the score]
-COUNTERFACTUAL: [What Sensory should have said instead. Write the improved response directly.]
-"""
-
-PLANNING_JUDGE_PROMPT = """You are evaluating the Planning module of a cognitive system.
-
-The Planning module's goals are:
-1. Generate at least 2 hypotheses to explain the situation
-2. Create actionable plans for each hypothesis
-3. Accurately predict expected value (EV) of each plan
-4. Select and communicate the highest EV plan clearly
-5. Avoid action vacillation/churn (don't flip-flop on decisions)
-
-Evaluation criteria:
-- Hypothesis quality: Are the hypotheses distinct and plausible?
-- Plan specificity: Are plans concrete and actionable?
-- EV calibration: Are probability estimates reasonable?
-- Decision quality: Was the best plan selected?
-- Clarity: Can Motor easily execute the instruction?
-
-You will be given:
-- The perception/context Planning received
-- The Planning module's response (hypotheses + plan)
-- The eventual outcome (if available)
-
-Output format (you MUST follow this exactly):
-SCORE: [0.0-1.0]
-REASONING: [1-2 sentences explaining the score]
-COUNTERFACTUAL: [What Planning should have said instead. Write the improved response directly.]
-"""
-
-MOTOR_JUDGE_PROMPT = """You are evaluating the Motor module of a cognitive system.
-
-The Motor module's goals are:
-1. Successfully follow instructions from Planning
-2. Translate high-level plans into concrete actions
-3. Execute actions accurately in the world
-4. Report results honestly back to Planning
-
-Evaluation criteria:
-- Fidelity: Did it follow the instruction correctly?
-- Translation: Was the high-level plan properly concretized?
-- Execution: Was the action performed successfully?
-- Communication: Is the output clear and appropriate?
-
-You will be given:
-- The instruction from Planning
-- Any sensory context available
-- The Motor module's action/output
-- The actual result (if available)
-
-Output format (you MUST follow this exactly):
-SCORE: [0.0-1.0]
-REASONING: [1-2 sentences explaining the score]
-COUNTERFACTUAL: [What Motor should have said instead. Write the improved response directly.]
-"""
-
-# Map room types to their judge prompts
-JUDGE_PROMPTS = {
-    RoomType.SENSORY: SENSORY_JUDGE_PROMPT,
-    RoomType.PLANNING: PLANNING_JUDGE_PROMPT,
-    RoomType.MOTOR: MOTOR_JUDGE_PROMPT,
-}
+    return "\n".join(lines)
 
 
 # =============================================================================
@@ -115,6 +69,7 @@ class JudgeInput:
     room_output: str  # What the room actually produced
     context: str  # The input/request the room received
     ground_truth: str = ""  # Optional: what actually happened / correct answer
+    message_history: list[tuple[str, str, str]] | None = None  # (source, msg_type, content)
     metadata: dict = None
 
     def __post_init__(self):
@@ -148,6 +103,13 @@ def build_judge_prompt(judge_input: JudgeInput) -> str:
 
 {judge_input.room_type.value.title()} Module's Response:
 {judge_input.room_output}
+"""
+
+    if judge_input.message_history:
+        history_str = format_message_history(judge_input.message_history)
+        user_content += f"""
+Recent Message History:
+{history_str}
 """
 
     if judge_input.ground_truth:
@@ -224,18 +186,167 @@ def parse_judge_output(raw_output: str, judge_input: JudgeInput) -> JudgeOutput:
 
 
 # =============================================================================
-# Batch Judge Processing
+# Batch Judge Processing (API-based, concurrent)
 # =============================================================================
 
-def build_judge_batch(inputs: list[JudgeInput]) -> list[str]:
-    """Build prompts for a batch of judge evaluations.
+def _build_chat_messages(judge_input: JudgeInput) -> list[dict]:
+    """Build chat messages for the judge API call."""
+    system_prompt = JUDGE_PROMPTS[judge_input.room_type]
+
+    user_content = f"""Context/Request:
+{judge_input.context}
+
+{judge_input.room_type.value.title()} Module's Response:
+{judge_input.room_output}
+"""
+
+    if judge_input.message_history:
+        history_str = format_message_history(judge_input.message_history)
+        user_content += f"""
+Recent Message History:
+{history_str}
+"""
+
+    if judge_input.ground_truth:
+        user_content += f"""
+Ground Truth/Outcome:
+{judge_input.ground_truth}
+"""
+    user_content += "\nEvaluate the response:"
+
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
+    ]
+
+
+async def _judge_one(
+    client: AsyncOpenAI,
+    judge_input: JudgeInput,
+) -> JudgeOutput:
+    """Evaluate a single input via the judge API."""
+    messages = _build_chat_messages(judge_input)
+    try:
+        resp = await client.chat.completions.create(
+            model=JUDGE_MODEL,
+            messages=messages,
+            max_tokens=JUDGE_MAX_TOKENS,
+        )
+        raw = resp.choices[0].message.content
+    except Exception as e:
+        print(f"Judge API error: {e}")
+        raw = f"SCORE: 0.5\nREASONING: API error: {e}\nCOUNTERFACTUAL: {judge_input.room_output}"
+
+    return parse_judge_output(raw, judge_input)
+
+
+async def _judge_batch_async(inputs: list[JudgeInput]) -> list[JudgeOutput]:
+    """Run all judge evaluations concurrently."""
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    api_key = os.environ.get("INF_API_KEY", "")
+    if not api_key:
+        print("ERROR: INF_API_KEY not set in .env")
+        return [
+            JudgeOutput(
+                room_type=inp.room_type,
+                score=0.5,
+                reasoning="INF_API_KEY not configured",
+                counterfactual=inp.room_output,
+                original=inp.room_output,
+            )
+            for inp in inputs
+        ]
+
+    client = AsyncOpenAI(base_url=JUDGE_BASE_URL, api_key=api_key)
+    return await asyncio.gather(*[_judge_one(client, inp) for inp in inputs])
+
+
+def judge_batch(inputs: list[JudgeInput]) -> list[JudgeOutput]:
+    """Evaluate a batch of judge inputs via DeepSeek API (concurrent).
 
     Args:
         inputs: List of JudgeInput to evaluate.
 
     Returns:
-        List of prompt strings (same order as inputs).
+        List of JudgeOutput (same order as inputs).
     """
+    if not inputs:
+        return []
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        # Already in an async context — run in a new thread to avoid deadlock
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, _judge_batch_async(inputs)).result()
+    else:
+        return asyncio.run(_judge_batch_async(inputs))
+
+
+# =============================================================================
+# Summarizer via Judge Model (concurrent)
+# =============================================================================
+
+async def _summarize_one(client: AsyncOpenAI, prompt: str) -> str:
+    """Generate a single summary via the judge model."""
+    try:
+        resp = await client.chat.completions.create(
+            model=JUDGE_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=200,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"Summarizer API error: {e}")
+        return f"(summary unavailable: {e})"
+
+
+async def _summarize_batch_async(prompts: list[str]) -> list[str]:
+    """Run all summarizations concurrently."""
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    api_key = os.environ.get("INF_API_KEY", "")
+    if not api_key:
+        print("ERROR: INF_API_KEY not set in .env")
+        return ["(INF_API_KEY not configured)"] * len(prompts)
+
+    client = AsyncOpenAI(base_url=JUDGE_BASE_URL, api_key=api_key)
+    return await asyncio.gather(*[_summarize_one(client, p) for p in prompts])
+
+
+def summarize_batch(prompts: list[str]) -> list[str]:
+    """Summarize a batch of room histories via DeepSeek API (concurrent).
+
+    Args:
+        prompts: List of summarizer prompts.
+
+    Returns:
+        List of summary strings (same order as prompts).
+    """
+    if not prompts:
+        return []
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, _summarize_batch_async(prompts)).result()
+    else:
+        return asyncio.run(_summarize_batch_async(prompts))
+
+
+# Keep old functions for backward compat with tests
+def build_judge_batch(inputs: list[JudgeInput]) -> list[str]:
+    """Build prompts for a batch of judge evaluations."""
     return [build_judge_prompt(inp) for inp in inputs]
 
 
@@ -243,15 +354,7 @@ def parse_judge_batch(
     raw_outputs: list[str],
     inputs: list[JudgeInput],
 ) -> list[JudgeOutput]:
-    """Parse a batch of raw judge outputs.
-
-    Args:
-        raw_outputs: Raw RWKV outputs.
-        inputs: Original inputs (for context).
-
-    Returns:
-        List of JudgeOutput (same order as inputs).
-    """
+    """Parse a batch of raw judge outputs."""
     return [
         parse_judge_output(raw, inp)
         for raw, inp in zip(raw_outputs, inputs)

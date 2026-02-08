@@ -24,7 +24,7 @@ class EditModelConfig:
 
     model_name: str = "google/t5gemma-2-270m-270m"
     device: str = "cuda:1"  # GPU 1 for T5 inference + training
-    dtype: torch.dtype = torch.bfloat16
+    dtype: torch.dtype = torch.float32  # T5 works better with float32
     max_input_length: int = 512
     max_output_length: int = 512
 

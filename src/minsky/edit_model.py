@@ -22,6 +22,8 @@ import json
 
 import torch
 
+from minsky.prompts.t5 import format_t5_prompt
+
 # Data directories
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
 TRAIN_DATA_DIR = DATA_DIR / "train_data"  # New training pairs go here
@@ -40,7 +42,7 @@ class EditModelConfig:
 
     model_path: str = ""  # Local path or HF model name
     device: str = "cuda:1"  # GPU 1 for T5 inference + training
-    dtype: torch.dtype = torch.bfloat16
+    dtype: torch.dtype = torch.float32  # T5 works better with float32
     max_input_length: int = 512
     max_output_length: int = 512
 
@@ -80,9 +82,9 @@ class EditModel:
         self.model = AutoModelForSeq2SeqLM.from_pretrained(
             model_path,
             torch_dtype=self.config.dtype,
-        ).to(self.config.device)
+        ).to(dtype=self.config.dtype, device=self.config.device)  # Explicit dtype cast ensures all params/buffers match
         self._initialized = True
-        print("Edit model loaded.")
+        print(f"Edit model loaded (dtype={self.config.dtype}).")
 
     def edit(
         self,
@@ -106,10 +108,7 @@ class EditModel:
             self.initialize()
 
         # Format input with task prefix
-        if context:
-            prompt = f"{task_prefix}: context: {context} text: {text}"
-        else:
-            prompt = f"{task_prefix}: {text}"
+        prompt = format_t5_prompt(text, context, task_prefix)
 
         # Truncate if too long
         if len(prompt) > self.config.max_input_length * 4:  # rough char estimate
@@ -169,33 +168,22 @@ class TrainingPair:
         )
 
 
-def save_training_pairs(pairs: list[TrainingPair], batch_name: str | None = None) -> Path:
-    """Save training pairs to data/train_data/.
+def save_training_pairs(pairs: list[TrainingPair]) -> Path:
+    """Append training pairs to today's file in data/train_data/.
+
+    One file per day: batch_YYYYMMDD.jsonl. Appends if the file already exists.
 
     Args:
         pairs: List of training pairs to save.
-        batch_name: Optional name for the batch file.
 
     Returns:
-        Path to the saved file.
+        Path to the file.
     """
     TRAIN_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    if batch_name is None:
-        batch_name = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    filepath = TRAIN_DATA_DIR / f"batch_{datetime.now().strftime('%Y%m%d')}.jsonl"
 
-    filepath = TRAIN_DATA_DIR / f"batch_{batch_name}.jsonl"
-
-    with open(filepath, "w") as f:
-        # Write metadata
-        metadata = {
-            "type": "metadata",
-            "num_pairs": len(pairs),
-            "timestamp": datetime.now().isoformat(),
-        }
-        f.write(json.dumps(metadata) + "\n")
-
-        # Write pairs
+    with open(filepath, "a") as f:
         for pair in pairs:
             f.write(json.dumps(pair.to_dict()) + "\n")
 
@@ -304,10 +292,7 @@ class EditModelTrainer:
         inputs_text = []
         targets_text = []
         for pair in batch:
-            if pair.context:
-                inp = f"{pair.task_prefix}: context: {pair.context} text: {pair.original}"
-            else:
-                inp = f"{pair.task_prefix}: {pair.original}"
+            inp = format_t5_prompt(pair.original, pair.context, pair.task_prefix)
             inputs_text.append(inp)
             targets_text.append(pair.edited)
 
@@ -476,7 +461,7 @@ class EditModelTrainer:
             self.model.model = AutoModelForSeq2SeqLM.from_pretrained(
                 path,
                 torch_dtype=self.model.config.dtype,
-            ).to(self.model.config.device)
+            ).to(dtype=self.model.config.dtype, device=self.model.config.device)
             self.model._initialized = True
 
             # Load training metadata if available

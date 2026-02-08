@@ -152,19 +152,18 @@ async def init_models(use_models: bool = True, rwkv_path: str | None = None):
 
     try:
         # Initialize RWKV
+        from minsky.llm_client import RWKVConfig
+        config = RWKVConfig()
         if rwkv_path:
-            from minsky.llm_client import RWKVConfig
-            config = RWKVConfig(model_path=rwkv_path)
-            orchestrator.batched_llm.initialize(config)
-        else:
-            orchestrator.batched_llm.initialize()
+            config.model_path = rwkv_path
+        orchestrator.rwkv.initialize(config)
 
         orchestrator.use_llm = True
         orchestrator.use_summarizers = True
 
         # Initialize T5 if using full stack
         if use_models:
-            orchestrator.batched_edit.initialize()
+            orchestrator.t5_edit.initialize()
             orchestrator.use_edit = True
 
         return {"status": "ok", "models_loaded": True}

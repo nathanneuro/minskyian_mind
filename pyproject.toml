@@ -15,6 +15,8 @@ dependencies = [
     "python-dotenv",
     "rwkv>=0.8.31",
     "huggingface-hub",
+    "openai",
+    "pillow",
 ]
 
 [tool.setuptools.packages.find]
@@ -23,3 +25,8 @@ where = ["src"]
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

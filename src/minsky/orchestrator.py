@@ -1,26 +1,26 @@
 """Orchestrator for the Society of Mind architecture.
 
 The orchestrator coordinates message passing between rooms and manages
-the multi-cycle communication loop. All rooms process in parallel as
-a batch through RWKV, then through T5 edit models.
+the multi-cycle communication loop. Uses room processors from rooms.py
+for actual message processing logic.
 """
 
+import re
 from dataclasses import dataclass, field
 from typing import Callable, Any
 
 from minsky.types import Message, RoomType, RoomState, MessageType
-from minsky.rooms import create_room_state
-from minsky.judges import JudgeInput, JudgeOutput, build_judge_batch, parse_judge_batch
+from minsky.rooms import create_room_state, ROOM_PROCESSORS
+from minsky.judges import JudgeInput, JudgeOutput, judge_batch, summarize_batch
 from minsky.edit_model import TrainingPair, save_training_pairs
+from minsky.prompts.summarizer import SUMMARIZER_PROMPT_TEMPLATE
+from minsky.prompts.forecast import FORECAST_PROMPT_TEMPLATE
+from minsky.prompts.t5 import format_t5_prompt
 
 
 @dataclass
-class BatchedLLM:
-    """Handles inference using the official rwkv pip package.
-
-    Uses CUDAGraph acceleration for fast token generation.
-    Processes prompts sequentially (RWKV doesn't batch well due to state).
-    """
+class RWKVWrapper:
+    """Wraps RWKV client to provide llm_fn interface for room processors."""
 
     client: Any = None
     config: Any = None
@@ -44,49 +44,34 @@ class BatchedLLM:
         self.config = config
         self._initialized = True
 
-    def generate_batch(
-        self,
-        prompts: list[str],
-        max_tokens: int = 256,
-        temperature: float = 1.0,
-        noise: float = 0.0,  # Not used, kept for API compatibility
-    ) -> list[str]:
-        """Generate responses for multiple prompts.
-
-        Note: RWKV processes sequentially due to stateful nature.
-        CUDAGraph acceleration makes each generation fast.
-
-        Args:
-            prompts: List of prompts to process.
-            max_tokens: Max tokens per response.
-            temperature: Sampling temperature.
-            noise: Ignored (kept for API compatibility).
-
-        Returns:
-            List of generated responses (same order as prompts).
-        """
+    def __call__(self, prompt: str) -> str:
+        """Generate next-token completion from a base model prompt."""
         if not self._initialized:
             self.initialize()
 
-        if not prompts:
-            return []
+        return self.client.generate(
+            prompt,
+            max_tokens=256,
+            temperature=1.0,
+            top_p=0.5,
+            stop_tokens=["\n---", "\n\n\n", "###", "INPUT:", "Example"],
+        )
 
-        results = []
-        for prompt in prompts:
-            response = self.client.generate(
-                prompt,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                top_p=0.0,  # Greedy by default
-            )
-            results.append(response)
+    def save_state(self, metadata: dict | None = None) -> None:
+        """Save RWKV state and metadata to disk."""
+        if self._initialized and self.client:
+            self.client.save_state(metadata)
 
-        return results
+    def get_saved_metadata(self) -> dict:
+        """Get metadata loaded from the state file."""
+        if self._initialized and self.client:
+            return self.client.saved_metadata
+        return {}
 
 
 @dataclass
-class BatchedEditModel:
-    """Handles batched T5 edit inference."""
+class T5EditWrapper:
+    """Wraps T5 edit model to provide edit_fn interface for room processors."""
 
     model: Any = None
     processor: Any = None
@@ -100,60 +85,43 @@ class BatchedEditModel:
 
         from transformers import AutoProcessor, AutoModelForSeq2SeqLM
         import torch
+        from pathlib import Path
 
-        model_name = config.model_name if config else "google/t5gemma-2-270m-270m"
+        # Try local path first, then HuggingFace
+        local_path = Path(__file__).parent.parent.parent / "data" / "models" / "t5gemma"
+        if local_path.exists():
+            model_name = str(local_path)
+            print(f"Loading T5 from local: {model_name}")
+        else:
+            model_name = config.model_name if config else "google/t5gemma-2-270m-270m"
+            print(f"Loading T5 from HuggingFace: {model_name}")
+
         device = config.device if config else "cuda:1"
-        dtype = config.dtype if config else torch.bfloat16
+        # T5 works better with float32
+        dtype = config.dtype if config else torch.float32
 
-        print(f"Loading batched T5: {model_name} on {device}")
         self.processor = AutoProcessor.from_pretrained(model_name)
         self.model = AutoModelForSeq2SeqLM.from_pretrained(
             model_name,
             torch_dtype=dtype,
-        ).to(device)
+        ).to(dtype=dtype, device=device)  # Explicit dtype cast ensures all params/buffers match
         self.config = config
         self._initialized = True
-        print("Batched T5 loaded.")
+        print(f"T5 edit model loaded on {device} (dtype={dtype})")
 
-    def edit_batch(
-        self,
-        texts: list[str],
-        task_prefixes: list[str],
-        contexts: list[str],
-        max_new_tokens: int = 256,
-    ) -> list[str]:
-        """Edit multiple texts in parallel.
-
-        Args:
-            texts: List of texts to edit.
-            task_prefixes: Task prefix for each text.
-            contexts: Context for each edit.
-            max_new_tokens: Max tokens per output.
-
-        Returns:
-            List of edited texts.
-        """
+    def __call__(self, text: str, context: str = "") -> str:
+        """Edit text with context (edit_fn interface)."""
         if not self._initialized:
             self.initialize()
 
-        if not texts:
-            return []
-
         import torch
 
-        # Format inputs
-        prompts = []
-        for text, prefix, ctx in zip(texts, task_prefixes, contexts):
-            if ctx:
-                prompts.append(f"{prefix}: context: {ctx} text: {text}")
-            else:
-                prompts.append(f"{prefix}: {text}")
+        prompt = format_t5_prompt(text, context)
 
-        # Tokenize batch
+        # Tokenize
         inputs = self.processor(
-            text=prompts,
+            text=prompt,
             return_tensors="pt",
-            padding=True,
             truncation=True,
             max_length=512,
         )
@@ -163,27 +131,32 @@ class BatchedEditModel:
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
-                max_new_tokens=max_new_tokens,
+                max_new_tokens=256,
                 do_sample=False,
             )
 
-        # Decode
-        results = []
-        for output in outputs:
-            text = self.processor.decode(output, skip_special_tokens=True)
-            results.append(text)
+        return self.processor.decode(outputs[0], skip_special_tokens=True)
 
-        return results
+
+@dataclass
+class PendingForecast:
+    """A forecast awaiting resolution against reality."""
+    cycle: int
+    raw_forecast: str      # RWKV raw output (becomes training `original`)
+    context: str           # What forecast was based on
 
 
 @dataclass
 class Orchestrator:
-    """Coordinates communication between rooms with batched processing.
+    """Coordinates communication between rooms.
+
+    Uses room processors from rooms.py for message processing.
+    Each room processor handles its own prompts and response parsing.
 
     Global step flow:
-    1. Batch all room prompts through RWKV (GPU 0)
-    2. Batch all outputs through T5 edit model (GPU 1)
-    3. Route edited outputs to target rooms
+    1. Route messages to target rooms
+    2. Each room processor generates prompts, calls LLM, parses responses
+    3. Collect outgoing messages and route to next targets
     4. Every N steps, run summarizers (RWKV only, no T5)
     """
 
@@ -196,9 +169,9 @@ class Orchestrator:
     current_cycle: int = 0  # This is the global step counter
     max_cycles: int = 5
 
-    # Batched processors
-    batched_llm: BatchedLLM = field(default_factory=BatchedLLM)
-    batched_edit: BatchedEditModel = field(default_factory=BatchedEditModel)
+    # Model wrappers (provide llm_fn and edit_fn interfaces)
+    rwkv: RWKVWrapper = field(default_factory=RWKVWrapper)
+    t5_edit: T5EditWrapper = field(default_factory=T5EditWrapper)
     use_llm: bool = False
     use_edit: bool = False
 
@@ -206,11 +179,6 @@ class Orchestrator:
     use_summarizers: bool = False
     summarizer_interval: int = 10  # Run summarizers every N global steps
     room_summaries: dict = field(default_factory=dict)  # Store summaries per room
-
-    # Legacy per-room LLM functions (for backward compatibility)
-    sensory_llm: Callable[[str], str] | None = None
-    planning_llm: Callable[[str], str] | None = None
-    motor_llm: Callable[[str], str] | None = None
 
     # Optional action function for Motor
     action_fn: Callable[[str], str] | None = None
@@ -220,7 +188,12 @@ class Orchestrator:
     judge_interval: int = 1  # Run judges every N global steps
     save_training_pairs: bool = True  # Save to data/train_data/
     training_pairs: list[TrainingPair] = field(default_factory=list)
-    pending_evaluations: list[tuple[RoomType, str, str]] = field(default_factory=list)  # (room, output, context)
+    # (room_type, output, context, history)
+    pending_evaluations: list[tuple[RoomType, str, str, list[tuple[str, str, str]] | None]] = field(default_factory=list)
+
+    # Forecast settings
+    use_forecasts: bool = False
+    pending_forecasts: list[PendingForecast] = field(default_factory=list)
 
     # Callbacks for visualization/debugging
     on_message: Callable[[Message], None] | None = None
@@ -228,6 +201,13 @@ class Orchestrator:
     on_cycle_end: Callable[[int, list[Message]], None] | None = None
     on_summarize: Callable[[str, str], None] | None = None  # (room, summary)
     on_judge: Callable[[JudgeOutput], None] | None = None  # Called when judge evaluates
+
+    def restore_from_saved_state(self) -> None:
+        """Restore orchestrator state (e.g. global_step) from RWKV saved metadata."""
+        meta = self.rwkv.get_saved_metadata()
+        if meta.get("global_step"):
+            self.current_cycle = meta["global_step"]
+            print(f"Restored global step: {self.current_cycle}")
 
     def get_state(self, room_type: RoomType) -> RoomState:
         """Get state for a specific room."""
@@ -251,6 +231,15 @@ class Orchestrator:
             case RoomType.MOTOR:
                 self.motor_state = state
 
+    def _extract_history(self, room_type: RoomType, max_messages: int = 8) -> list[tuple[str, str, str]]:
+        """Extract recent message history from a room's state as tuples."""
+        state = self.get_state(room_type)
+        recent = state.get_recent_messages(max_messages)
+        return [
+            (msg.source.value, msg.message_type.value, msg.content)
+            for msg in recent
+        ]
+
     def inject_message(self, message: Message) -> None:
         """Inject a message into the system."""
         message.cycle = self.current_cycle
@@ -260,7 +249,15 @@ class Orchestrator:
             self.on_message(message)
 
     def run_cycle(self) -> list[Message]:
-        """Run a single cycle with batched processing."""
+        """Run a single cycle using room processors from rooms.py.
+
+        Each room processor handles:
+        - Building prompts internally
+        - Calling llm_fn for generation
+        - Parsing structured output (TO_PLANNING, TO_MOTOR, etc.)
+        - Creating outgoing messages with proper length limits
+        - Tool execution (Motor only)
+        """
         if self.on_cycle_start:
             self.on_cycle_start(self.current_cycle)
 
@@ -280,53 +277,54 @@ class Orchestrator:
             elif msg.target in messages_by_room:
                 messages_by_room[msg.target].append(msg)
 
-        # Collect prompts that need LLM processing
-        llm_requests: list[tuple[RoomType, str, Message]] = []
+        # Get llm_fn and edit_fn based on settings
+        llm_fn = self.rwkv if self.use_llm else None
+        edit_fn = self.t5_edit if self.use_edit else None
 
+        # Process each room using its processor from rooms.py
         for room_type, messages in messages_by_room.items():
+            if not messages:
+                continue
+
             state = self.get_state(room_type)
-            for msg in messages:
-                state.add_message(msg)
-                prompt = self._build_prompt(room_type, msg, state)
-                if prompt:
-                    llm_requests.append((room_type, prompt, msg))
-            self.set_state(room_type, state)
+            processor = ROOM_PROCESSORS[room_type]
 
-        # Batch process through RWKV
-        if llm_requests and self.use_llm:
-            prompts = [req[1] for req in llm_requests]
-            responses = self.batched_llm.generate_batch(prompts)
+            # Call the room processor (it handles prompts, LLM, parsing internally)
+            if room_type == RoomType.MOTOR:
+                # Motor processor has extra action_fn parameter
+                new_state, outgoing = processor(
+                    state, messages, llm_fn, edit_fn, self.action_fn
+                )
+            else:
+                new_state, outgoing = processor(state, messages, llm_fn, edit_fn)
 
-            # Batch process through T5 edit
-            if self.use_edit:
-                task_prefixes = [f"edit_{req[0].value}" for req in llm_requests]
-                contexts = [req[2].content[:100] for req in llm_requests]
-                responses = self.batched_edit.edit_batch(responses, task_prefixes, contexts)
+            self.set_state(room_type, new_state)
 
-            # Create outgoing messages
-            for (room_type, prompt, msg), response in zip(llm_requests, responses):
-                outgoing = self._create_response(room_type, msg, response)
-                for out_msg in outgoing:
-                    out_msg.cycle = self.current_cycle
-                    self.message_log.append(out_msg)
-                    if self.on_message:
-                        self.on_message(out_msg)
-                    next_queue.extend(outgoing)
+            # Log and queue outgoing messages
+            for out_msg in outgoing:
+                out_msg.cycle = self.current_cycle
+                self.message_log.append(out_msg)
+                if self.on_message:
+                    self.on_message(out_msg)
 
-                # Queue for judge evaluation
-                if self.use_judges:
-                    self.pending_evaluations.append((room_type, response, prompt))
-        else:
-            # Stub mode - process without LLM
-            for room_type, _, msg in llm_requests:
-                response = f"[{room_type.value} stub response]"
-                outgoing = self._create_response(room_type, msg, response)
-                for out_msg in outgoing:
-                    out_msg.cycle = self.current_cycle
-                    self.message_log.append(out_msg)
-                    if self.on_message:
-                        self.on_message(out_msg)
-                next_queue.extend(outgoing)
+                if out_msg.target == RoomType.EXTERNAL:
+                    if out_msg.content:  # Only add non-empty external messages
+                        external_outputs.append(out_msg)
+                else:
+                    next_queue.append(out_msg)
+
+            # Queue for judge evaluation (all three rooms)
+            if self.use_judges:
+                # Pick first non-empty output as representative for this room
+                representative = next(
+                    (m.content for m in outgoing if m.content and m.target != RoomType.EXTERNAL),
+                    None,
+                )
+                if representative:
+                    history = self._extract_history(room_type)
+                    self.pending_evaluations.append(
+                        (room_type, representative, new_state.current_context, history)
+                    )
 
         self.message_queue = next_queue
         self.current_cycle += 1
@@ -339,23 +337,24 @@ class Orchestrator:
         if self.use_judges and self.current_cycle % self.judge_interval == 0:
             self._run_judges()
 
+        # Forecasts: resolve old, generate new
+        if self.use_forecasts and self.use_llm:
+            self._resolve_forecasts()
+            self._generate_forecast()
+
         if self.on_cycle_end:
             self.on_cycle_end(self.current_cycle - 1, external_outputs)
 
         return external_outputs
 
     def _run_summarizers(self) -> None:
-        """Run summarizer agents for each room (RWKV only, no T5).
+        """Run summarizer agents for each room via DeepSeek API.
 
         Summarizers compress the message history of each room into
-        a concise summary that can be used as context.
+        a concise summary. All rooms are summarized concurrently.
         """
-        if not self.use_llm:
-            return
-
-        # Build summarization prompts for each room
-        summarize_prompts = []
         room_types = []
+        prompts = []
 
         for room_type in [RoomType.SENSORY, RoomType.PLANNING, RoomType.MOTOR]:
             state = self.get_state(room_type)
@@ -364,45 +363,36 @@ class Orchestrator:
             if not recent_messages:
                 continue
 
-            # Build message history string
             history = "\n".join([
                 f"[{m.message_type.value}] {m.content[:200]}"
                 for m in recent_messages
             ])
 
-            prompt = (
-                f"Summarize the following {room_type.value} room activity in 2-3 sentences. "
-                f"Focus on key observations, decisions, and actions.\n\n"
-                f"Activity:\n{history}\n\n"
-                f"Summary:"
+            prompt = SUMMARIZER_PROMPT_TEMPLATE.format(
+                room_type=room_type.value,
+                history=history,
             )
-            summarize_prompts.append(prompt)
             room_types.append(room_type)
+            prompts.append(prompt)
 
-        if not summarize_prompts:
+        if not prompts:
             return
 
-        # Batch through RWKV only (no T5 edit for summarizers)
-        summaries = self.batched_llm.generate_batch(
-            summarize_prompts,
-            max_tokens=128,
-            temperature=0.5,
-            noise=0.3,
-        )
+        summaries = summarize_batch(prompts)
 
-        # Store summaries
         for room_type, summary in zip(room_types, summaries):
             self.room_summaries[room_type.value] = summary
             if self.on_summarize:
                 self.on_summarize(room_type.value, summary)
 
     def _run_judges(self) -> None:
-        """Run judges on pending evaluations (RWKV only, no T5).
+        """Run judges on pending evaluations via DeepSeek API.
 
         Judges evaluate room outputs and generate counterfactuals
         that become training targets for the T5 edit model.
+        All API calls run concurrently.
         """
-        if not self.use_llm or not self.pending_evaluations:
+        if not self.pending_evaluations:
             return
 
         # Build judge inputs
@@ -411,21 +401,13 @@ class Orchestrator:
                 room_type=room_type,
                 room_output=output,
                 context=context,
+                message_history=history,
             )
-            for room_type, output, context in self.pending_evaluations
+            for room_type, output, context, history in self.pending_evaluations
         ]
 
-        # Build prompts and run through RWKV (no T5 edit for judges)
-        prompts = build_judge_batch(judge_inputs)
-        raw_outputs = self.batched_llm.generate_batch(
-            prompts,
-            max_tokens=256,
-            temperature=0.3,  # Lower temp for more consistent judgments
-            noise=0.2,
-        )
-
-        # Parse outputs
-        judge_outputs = parse_judge_batch(raw_outputs, judge_inputs)
+        # Run all evaluations concurrently via DeepSeek API
+        judge_outputs = judge_batch(judge_inputs)
 
         # Convert to training pairs and store
         for judge_output in judge_outputs:
@@ -446,6 +428,92 @@ class Orchestrator:
         # Clear pending evaluations
         self.pending_evaluations = []
 
+        # Save training pairs to disk if enabled
+        if self.save_training_pairs and self.training_pairs:
+            filepath = save_training_pairs(self.training_pairs)
+            print(f"Saved {len(self.training_pairs)} training pairs to {filepath}")
+            self.training_pairs = []
+
+    def _generate_forecast(self) -> None:
+        """Generate a sensory forecast using RWKV (raw, no T5 edit).
+
+        Gathers recent Motor commands and external events, then asks
+        RWKV to predict what Sensory will observe next cycle.
+        """
+        # Gather recent events from all rooms
+        event_parts = []
+        for room_type in [RoomType.MOTOR, RoomType.PLANNING, RoomType.SENSORY]:
+            state = self.get_state(room_type)
+            recent = state.get_recent_messages(4)
+            for msg in recent:
+                if msg.content:
+                    event_parts.append(f"{msg.source.value}->{msg.target.value}: {msg.content[:80]}")
+
+        if not event_parts:
+            return
+
+        recent_events = " | ".join(event_parts[-6:])  # Last 6 events, capped
+        prompt = FORECAST_PROMPT_TEMPLATE.format(recent_events=recent_events)
+        raw_forecast = self.rwkv(prompt)
+
+        # Strip closing tag if RWKV generated it
+        raw_forecast = re.sub(r'</forecast>.*', '', raw_forecast, flags=re.DOTALL).strip()
+
+        if raw_forecast:
+            self.pending_forecasts.append(PendingForecast(
+                cycle=self.current_cycle,
+                raw_forecast=raw_forecast,
+                context=recent_events,
+            ))
+
+    def _resolve_forecasts(self) -> None:
+        """Resolve pending forecasts against actual reality.
+
+        For forecasts at least 1 cycle old, compare the prediction
+        against what actually happened and create training pairs.
+        """
+        if not self.pending_forecasts:
+            return
+
+        resolved = []
+        kept = []
+
+        for forecast in self.pending_forecasts:
+            if self.current_cycle - forecast.cycle < 1:
+                kept.append(forecast)
+                continue
+
+            # Gather actual events from Sensory since the forecast
+            sensory_recent = self.sensory_state.get_recent_messages(6)
+            actual_parts = []
+            for msg in sensory_recent:
+                if msg.cycle >= forecast.cycle and msg.content:
+                    actual_parts.append(msg.content[:100])
+
+            if actual_parts:
+                actual_events = " ".join(actual_parts)
+                pair = TrainingPair(
+                    original=forecast.raw_forecast,
+                    edited=actual_events,
+                    task_prefix="forecast_sensory",
+                    context=forecast.context,
+                )
+                self.training_pairs.append(pair)
+                resolved.append(forecast)
+            elif self.current_cycle - forecast.cycle > 3:
+                # Too old, discard
+                resolved.append(forecast)
+            else:
+                kept.append(forecast)
+
+        self.pending_forecasts = kept
+
+        # Save forecast training pairs alongside judge pairs
+        if self.save_training_pairs and self.training_pairs:
+            filepath = save_training_pairs(self.training_pairs)
+            print(f"Saved {len(self.training_pairs)} training pairs (incl. forecasts) to {filepath}")
+            self.training_pairs = []
+
     def get_training_pairs(self, clear: bool = True) -> list[TrainingPair]:
         """Get accumulated training pairs for T5.
 
@@ -459,107 +527,6 @@ class Orchestrator:
         if clear:
             self.training_pairs = []
         return pairs
-
-    def _build_prompt(self, room_type: RoomType, msg: Message, state: RoomState) -> str | None:
-        """Build prompt for LLM based on room type and message."""
-        match room_type:
-            case RoomType.SENSORY:
-                if msg.message_type == MessageType.ATTENTION_REQUEST:
-                    return (
-                        f"Focus attention on: {msg.content}\n"
-                        f"Current context: {state.current_context}\n"
-                        f"What do you observe?"
-                    )
-            case RoomType.PLANNING:
-                if msg.message_type == MessageType.PERCEPTION:
-                    return (
-                        f"Given this perception: {msg.content}\n\n"
-                        f"1. Generate at least 2 hypotheses explaining this situation.\n"
-                        f"2. For each hypothesis, generate a plan.\n"
-                        f"3. Estimate the expected value (0-1) of each plan.\n"
-                        f"4. Select the highest EV plan.\n\n"
-                        f"What is your highest EV plan, stated as a clear instruction?"
-                    )
-                elif msg.message_type == MessageType.ATTENTION_RESPONSE:
-                    return (
-                        f"Additional sensory information: {msg.content}\n"
-                        f"Previous context: {state.current_context}\n\n"
-                        f"Generate the highest EV plan as a clear instruction for Motor."
-                    )
-            case RoomType.MOTOR:
-                if msg.message_type == MessageType.MOTOR_COMMAND:
-                    sensory_context = state.metadata.get("sensory_context", "")
-                    return (
-                        f"Instruction from Planning: {msg.content}\n"
-                        f"Sensory context: {sensory_context}\n\n"
-                        f"Translate this into a concrete action or response."
-                    )
-        return None
-
-    def _create_response(self, room_type: RoomType, msg: Message, response: str) -> list[Message]:
-        """Create outgoing messages based on room response."""
-        outgoing = []
-
-        match room_type:
-            case RoomType.SENSORY:
-                if msg.message_type == MessageType.ATTENTION_REQUEST:
-                    outgoing.append(Message(
-                        content=response,
-                        source=RoomType.SENSORY,
-                        target=RoomType.PLANNING,
-                        message_type=MessageType.ATTENTION_RESPONSE,
-                    ))
-
-            case RoomType.PLANNING:
-                state = self.get_state(RoomType.PLANNING)
-                if not state.metadata.get("attention_requested"):
-                    # First, request attention
-                    outgoing.append(Message(
-                        content=f"What are the key details about: {msg.content[:50]}?",
-                        source=RoomType.PLANNING,
-                        target=RoomType.SENSORY,
-                        message_type=MessageType.ATTENTION_REQUEST,
-                    ))
-                    state.metadata["attention_requested"] = True
-                    self.set_state(RoomType.PLANNING, state)
-                else:
-                    # Send plan to Motor
-                    outgoing.append(Message(
-                        content=response,
-                        source=RoomType.PLANNING,
-                        target=RoomType.MOTOR,
-                        message_type=MessageType.MOTOR_COMMAND,
-                    ))
-
-            case RoomType.MOTOR:
-                # Execute action
-                if self.action_fn:
-                    result = self.action_fn(response)
-                else:
-                    result = f"[Action completed: {response[:50]}]"
-
-                outgoing.extend([
-                    Message(
-                        content=response,
-                        source=RoomType.MOTOR,
-                        target=RoomType.SENSORY,
-                        message_type=MessageType.ACTION,
-                    ),
-                    Message(
-                        content=result,
-                        source=RoomType.MOTOR,
-                        target=RoomType.PLANNING,
-                        message_type=MessageType.ACTION_RESULT,
-                    ),
-                    Message(
-                        content=response,
-                        source=RoomType.MOTOR,
-                        target=RoomType.EXTERNAL,
-                        message_type=MessageType.ACTION,
-                    ),
-                ])
-
-        return outgoing
 
     def run_until_output(self, initial_input: str) -> list[Message]:
         """Run cycles until Motor produces output or max_cycles reached."""
@@ -598,6 +565,18 @@ class Orchestrator:
         for msg in self.message_log:
             lines.append(f"[Cycle {msg.cycle}] {msg}")
         return "\n".join(lines)
+
+    def shutdown(self) -> None:
+        """Gracefully shutdown, saving RWKV state and any remaining training pairs."""
+        # Flush remaining training pairs to disk
+        if self.save_training_pairs and self.training_pairs:
+            filepath = save_training_pairs(self.training_pairs)
+            print(f"Saved {len(self.training_pairs)} remaining training pairs to {filepath}")
+            self.training_pairs = []
+
+        if self.use_llm:
+            self.rwkv.save_state({"global_step": self.current_cycle})
+            print("RWKV state saved.")
 
 
 def run_cycle(orchestrator: Orchestrator, input_text: str | None = None) -> list[Message]:
