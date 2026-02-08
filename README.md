@@ -6,61 +6,91 @@ coordinated by an orchestrator. A frozen LLM generates text; a small trainable
 T5 model learns to edit it based on judge feedback.
 
 ```
-                            ┌─────────────────────────────┐
-                            │       EXTERNAL USER         │
-                            │   (real or fake_user bot)    │
-                            └──────────┬──────────────────┘
-                                       │ unbounded messages
-                                       │
-              ┌────────────────────────┼────────────────────────┐
-              │                  ORCHESTRATOR                    │
-              │  routes messages, runs judges & summarizers      │
-              │                                                 │
-              │  ┌─────────┐   ┌──────────┐   ┌─────────────┐  │
-              │  │ Judges   │   │Summarize │   │  Forecast   │  │
-              │  │(DeepSeek)│   │(DeepSeek)│   │   (RWKV)    │  │
-              │  └─────────┘   └──────────┘   └─────────────┘  │
-              └──┬──────────────────┬───────────────────┬───────┘
-                 │                  │                   │
-        ~256 char messages   ~256 char messages  ~256 char messages
-                 │                  │                   │
-    ┌────────────▼───┐   ┌─────────▼────┐   ┌─────────▼──────┐
-    │    SENSORY      │   │   PLANNING    │   │     MOTOR      │
-    │                 │   │               │   │                │
-    │ ┌─────────────┐ │   │ ┌───────────┐ │   │ ┌────────────┐ │
-    │ │ Agent L / R  │ │   │ │ Agent L/R │ │   │ │ Agent L / R│ │
-    │ │ (free-form)  │ │   │ │(free-form)│ │   │ │ (free-form)│ │
-    │ │  unbounded   │ │   │ │ unbounded │ │   │ │  unbounded │ │
-    │ └──────┬──────┘ │   │ └─────┬─────┘ │   │ └─────┬──────┘ │
-    │        ▼         │   │       ▼       │   │       ▼        │
-    │ ┌─────────────┐ │   │ ┌───────────┐ │   │ ┌────────────┐ │
-    │ │ Agent R / L  │ │   │ │ Agent R/L │ │   │ │ Agent R / L│ │
-    │ │ (structured) │ │   │ │(structured│ │   │ │(structured)│ │
-    │ └─────────────┘ │   │ └───────────┘ │   │ └────────────┘ │
-    │                 │   │               │   │                │
-    │ Observes world, │   │ Hypothesizes, │   │ Calls tools,   │
-    │ summarizes,     │   │ picks best    │   │ sends messages │
-    │ directs         │   │ action,       │   │ to external    │
-    │ attention       │   │ commands      │   │ user           │
-    └─────────────────┘   └───────────────┘   └────────────────┘
-                                                     │
-                                              ┌──────▼───────┐
-                                              │    TOOLS     │
-                                              │ web_search   │
-                                              │ memory_*     │
-                                              │ scratchpad_* │
-                                              └──────────────┘
+                       ┌───────────────┐
+                       │ EXTERNAL USER │
+                       └──┬─────────▲──┘
+                          │         │
+                 input    │         │  TO_EXTERNAL
+              (unbounded) │         │  (unbounded)
+                          │         │
+    ┌─────────────────────▼──┐      │
+    │        SENSORY          │      │
+    │                         │      │
+    │  Perceives the world:   │      │
+    │  user input, tool       │      │
+    │  results, attention     │      │
+    │  requests from Planning │      │
+    │                         │      │
+    │  ┌───────┐    ┌───────┐ │      │
+    │  │Agent L│◄──▶│Agent R│ │      │
+    │  └───────┘    └───────┘ │      │
+    │   (random order, unbounded)     │
+    └────────────┬────────────┘      │
+                 │                   │
+            summaries                │
+            (~256 chars)             │
+                 │                   │
+    ┌────────────▼────────────┐      │
+    │       PLANNING          │      │
+    │                         │      │
+    │  Generates hypotheses,  │      │
+    │  picks best action,     │      │
+    │  directs attention      │      │
+    │                         │      │
+    │  ┌───────┐    ┌───────┐ │      │
+    │  │Agent L│◄──▶│Agent R│ │      │
+    │  └───────┘    └───────┘ │      │
+    │   (random order, unbounded)     │
+    └──┬──────────────────┬───┘      │
+       │                  │          │
+  attention            commands      │
+  requests             (~256 chars)  │
+  (~256 chars)            │          │
+       │     ┌────────────▼──────────┤
+       │     │        MOTOR          │
+       │     │                       │
+       │     │  Executes commands:   │
+       │     │  calls tools or sends │
+       │     │  TO_EXTERNAL to user  │
+       │     │                       │
+       │     │  ┌───────┐  ┌───────┐ │
+       │     │  │Agent L│◄▶│Agent R│ │
+       │     │  └───────┘  └───────┘ │
+       │     │  (random order, unbounded)
+       │     └───────────┬───────────┘
+       │                 │
+       │            tool calls
+       │                 │
+       │          ┌──────▼───────┐
+       │          │    TOOLS     │
+       │          │ web_search   │
+       │          │ memory_*     │
+       │          │ scratchpad_* │
+       │          └──────┬───────┘
+       │                 │
+       │          tool results
+       │          (unbounded)
+       │                 │
+       └──────┐          │
+              ▼          ▼
+          ┌──────────────────┐
+          │ back to SENSORY  │
+          └──────────────────┘
 
-    ┌──────────────────────────────────────────────────────────┐
-    │                   GPU PIPELINE                           │
-    │                                                          │
-    │   GPU 0: Frozen LLM (Qwen 8B or RWKV 7B)               │
-    │          generates raw text for each room agent          │
-    │                                                          │
-    │   GPU 1: T5Gemma 270M (trainable edit model)            │
-    │          edits raw LLM output into structured messages   │
-    │          learns from judge counterfactuals               │
-    └──────────────────────────────────────────────────────────┘
+  Between rooms: short messages (~256 chars)
+  Within rooms: two agents talk freely (unbounded)
+  TO_EXTERNAL and tool results: unbounded
+
+  ┌──────────────────────────────────────────────────────┐
+  │                   GPU PIPELINE                       │
+  │                                                      │
+  │  GPU 0: Frozen LLM (Qwen 8B or RWKV 7B)            │
+  │         generates raw text for each room agent       │
+  │                                                      │
+  │  GPU 1: T5Gemma 270M (trainable edit model)         │
+  │         cleans raw output into structured messages   │
+  │         learns from judge counterfactuals            │
+  └──────────────────────────────────────────────────────┘
 ```
 
 ## How It Works
