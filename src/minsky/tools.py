@@ -54,6 +54,58 @@ PAGE_CONTENT_MAX_CHARS = 3000  # Max chars per page
 TOTAL_CONTENT_MAX_CHARS = 12000  # Max total chars across all pages
 FETCH_TIMEOUT = 15.0  # Timeout for individual page fetches
 
+# Web cache directory
+WEB_CACHE_DIR = DATA_DIR / "web_cache"
+
+
+# =============================================================================
+# Web Cache (query → results on disk)
+# =============================================================================
+
+def _cache_key(query: str) -> str:
+    """Normalize query into a filesystem-safe cache key."""
+    import hashlib
+    normalized = query.strip().lower()
+    return hashlib.sha256(normalized.encode()).hexdigest()[:16]
+
+
+def _cache_get(query: str) -> ToolResult | None:
+    """Look up a cached search result. Returns None on miss."""
+    key = _cache_key(query)
+    path = WEB_CACHE_DIR / f"{key}.json"
+    if not path.exists():
+        return None
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return ToolResult(
+            success=True,
+            output=data["output"],
+            metadata={**data.get("metadata", {}), "cached": True},
+        )
+    except Exception:
+        return None
+
+
+def _cache_put(query: str, result: ToolResult) -> None:
+    """Save a search result to the cache."""
+    WEB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    key = _cache_key(query)
+    path = WEB_CACHE_DIR / f"{key}.json"
+    try:
+        with open(path, "w") as f:
+            json.dump({
+                "query": query,
+                "output": result.output,
+                "metadata": result.metadata,
+            }, f)
+    except Exception as e:
+        print(f"Cache write failed: {e}")
+
+
+# =============================================================================
+# Fetch + Clean
+# =============================================================================
 
 def _fetch_and_clean(url: str) -> str:
     """Fetch a URL and extract clean text content.
@@ -80,6 +132,10 @@ def _fetch_pages_concurrent(urls: list[str]) -> list[str]:
         return list(pool.map(_fetch_and_clean, urls))
 
 
+# =============================================================================
+# Web Search
+# =============================================================================
+
 def web_search(
     query: str,
     num_results: int = 3,
@@ -87,9 +143,10 @@ def web_search(
 ) -> ToolResult:
     """Search the web and return cleaned page contents.
 
-    Two-step process:
+    Checks local cache first. On miss:
     1. Search via Exa API (requests full text content from Exa)
     2. For results missing content, fetch and extract via trafilatura
+    3. Cache the result for future queries
 
     Args:
         query: Search query.
@@ -99,6 +156,12 @@ def web_search(
     Returns:
         ToolResult with search results including page content.
     """
+    # Check cache first
+    cached = _cache_get(query)
+    if cached is not None:
+        print(f"Web cache hit for: {query[:60]}")
+        return cached
+
     if not EXA_API_KEY:
         return ToolResult(
             success=False,
@@ -181,11 +244,16 @@ def web_search(
 
         output = f"Search results for: {query}\n\n" + "\n\n---\n\n".join(formatted)
 
-        return ToolResult(
+        result = ToolResult(
             success=True,
             output=output,
             metadata={"num_results": len(formatted), "query": query},
         )
+
+        # Cache the result
+        _cache_put(query, result)
+
+        return result
 
     except httpx.HTTPStatusError as e:
         return ToolResult(
