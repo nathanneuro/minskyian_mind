@@ -11,7 +11,7 @@ from typing import Callable, Any
 
 from minsky.types import Message, RoomType, RoomState, MessageType
 from minsky.rooms import create_room_state, ROOM_PROCESSORS
-from minsky.judges import JudgeInput, JudgeOutput, judge_batch, summarize_batch, fake_user_respond
+from minsky.judges import JudgeInput, JudgeOutput, judge_batch, summarize_batch, fake_user_respond, AgentConfig, configure_agents
 from minsky.edit_model import TrainingPair, save_training_pairs
 from minsky.prompts.summarizer import SUMMARIZER_PROMPT_TEMPLATE
 from minsky.prompts.forecast import FORECAST_PROMPT_TEMPLATE
@@ -184,6 +184,12 @@ class Orchestrator:
     use_llm: bool = False
     use_edit: bool = False
 
+    # What becomes the "accepted truth" routed between rooms:
+    #   "raw"      - raw LLM output (skip T5 even if loaded)
+    #   "edited"   - T5-edited output (default, current behavior)
+    #   "improved" - judge counterfactual replaces routed messages each cycle
+    room_output_source: str = "edited"
+
     # Summarizer settings (RWKV only, no T5)
     use_summarizers: bool = False
     summarizer_interval: int = 10  # Run summarizers every N global steps
@@ -290,9 +296,13 @@ class Orchestrator:
             elif msg.target in messages_by_room:
                 messages_by_room[msg.target].append(msg)
 
-        # Get llm_fn and edit_fn based on settings
+        # Get llm_fn and edit_fn based on settings and room_output_source
         llm_fn = self.rwkv if self.use_llm else None
-        edit_fn = self.t5_edit if self.use_edit else None
+        if self.room_output_source == "raw":
+            # Skip T5 even if loaded — rooms get raw LLM output
+            edit_fn = None
+        else:
+            edit_fn = self.t5_edit if self.use_edit else None
 
         # Process each room using its processor from rooms.py
         for room_type, messages in messages_by_room.items():
@@ -339,6 +349,16 @@ class Orchestrator:
                         (room_type, representative, raw_output, new_state.current_context, history)
                     )
 
+        # "improved" mode: run judges immediately and replace queued messages
+        if self.room_output_source == "improved" and self.use_judges and self.pending_evaluations:
+            judge_outputs = self._run_judges()
+            for jo in judge_outputs:
+                if jo.counterfactual != jo.original:
+                    for msg in next_queue:
+                        if msg.source == jo.room_type and msg.content == jo.original:
+                            msg.content = jo.counterfactual[:256]
+                            break
+
         self.message_queue = next_queue
         self.current_cycle += 1
 
@@ -346,8 +366,8 @@ class Orchestrator:
         if self.use_summarizers and self.current_cycle % self.summarizer_interval == 0:
             self._run_summarizers()
 
-        # Run judges every N global steps
-        if self.use_judges and self.current_cycle % self.judge_interval == 0:
+        # Run judges every N global steps (skip if "improved" already ran them)
+        if self.room_output_source != "improved" and self.use_judges and self.current_cycle % self.judge_interval == 0:
             self._run_judges()
 
         # Forecasts: resolve old, generate new
@@ -404,15 +424,18 @@ class Orchestrator:
             if self.on_summarize:
                 self.on_summarize(room_type.value, summary)
 
-    def _run_judges(self) -> None:
-        """Run judges on pending evaluations via DeepSeek API.
+    def _run_judges(self) -> list[JudgeOutput]:
+        """Run judges on pending evaluations via agent API.
 
         Judges evaluate room outputs and generate counterfactuals
         that become training targets for the T5 edit model.
         All API calls run concurrently.
+
+        Returns:
+            List of JudgeOutput (empty if nothing to evaluate).
         """
         if not self.pending_evaluations:
-            return
+            return []
 
         # Build judge inputs (judge evaluates the t5_edited output)
         judge_inputs = [
@@ -428,7 +451,7 @@ class Orchestrator:
         # Build raw_output lookup keyed by index
         raw_outputs = [raw for _, _, raw, _, _ in self.pending_evaluations]
 
-        # Run all evaluations concurrently via DeepSeek API
+        # Run all evaluations concurrently via agent API
         judge_outputs = judge_batch(judge_inputs)
 
         # Convert to training pairs and store
@@ -456,6 +479,8 @@ class Orchestrator:
             filepath = save_training_pairs(self.training_pairs)
             print(f"Saved {len(self.training_pairs)} training pairs to {filepath}")
             self.training_pairs = []
+
+        return judge_outputs
 
     def _run_fake_user(self, external_msg: Message) -> None:
         """Generate a simulated user response to a single TO_EXTERNAL message.

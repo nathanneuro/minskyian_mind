@@ -1,7 +1,7 @@
 """Judges for evaluating room outputs and generating training signals.
 
 Each room has a dedicated judge with a specific evaluation rubric.
-Judges use DeepSeek-V3.2 via OpenAI-compatible API and output:
+Judges use a configurable API model (default: DeepSeek-V3.2) and output:
 1. A score (0-1)
 2. A counterfactual: "what should have been done instead"
 
@@ -17,10 +17,27 @@ from openai import AsyncOpenAI
 from minsky.types import RoomType
 from minsky.prompts.judges import JUDGE_PROMPTS
 
-# Judge API configuration
-JUDGE_MODEL = "QuantTrio/DeepSeek-V3.2-AWQ"
-JUDGE_BASE_URL = "https://api.infinity.inc/v1"
-JUDGE_MAX_TOKENS = 1000
+
+# =============================================================================
+# Agent configuration (judge / summarizer / fake-user model)
+# =============================================================================
+
+@dataclass
+class AgentConfig:
+    """Configuration for the agent model used by judges, summarizers, and fake user."""
+    model: str = "QuantTrio/DeepSeek-V3.2-AWQ"
+    base_url: str = "https://api.infinity.inc/v1"
+    api_key_env: str = "INF_API_KEY"
+    max_tokens: int = 1000
+
+
+_agent_config = AgentConfig()
+
+
+def configure_agents(config: AgentConfig) -> None:
+    """Set the agent model configuration used by all judge/summarizer/fake-user calls."""
+    global _agent_config
+    _agent_config = config
 
 
 # =============================================================================
@@ -228,9 +245,9 @@ async def _judge_one(
     messages = _build_chat_messages(judge_input)
     try:
         resp = await client.chat.completions.create(
-            model=JUDGE_MODEL,
+            model=_agent_config.model,
             messages=messages,
-            max_tokens=JUDGE_MAX_TOKENS,
+            max_tokens=_agent_config.max_tokens,
         )
         raw = resp.choices[0].message.content
     except Exception as e:
@@ -245,21 +262,21 @@ async def _judge_batch_async(inputs: list[JudgeInput]) -> list[JudgeOutput]:
     from dotenv import load_dotenv
     load_dotenv()
 
-    api_key = os.environ.get("INF_API_KEY", "")
+    api_key = os.environ.get(_agent_config.api_key_env, "")
     if not api_key:
-        print("ERROR: INF_API_KEY not set in .env")
+        print(f"ERROR: {_agent_config.api_key_env} not set in .env")
         return [
             JudgeOutput(
                 room_type=inp.room_type,
                 score=0.5,
-                reasoning="INF_API_KEY not configured",
+                reasoning=f"{_agent_config.api_key_env} not configured",
                 counterfactual=inp.room_output,
                 original=inp.room_output,
             )
             for inp in inputs
         ]
 
-    client = AsyncOpenAI(base_url=JUDGE_BASE_URL, api_key=api_key)
+    client = AsyncOpenAI(base_url=_agent_config.base_url, api_key=api_key)
     return await asyncio.gather(*[_judge_one(client, inp) for inp in inputs])
 
 
@@ -293,10 +310,10 @@ def judge_batch(inputs: list[JudgeInput]) -> list[JudgeOutput]:
 # =============================================================================
 
 async def _summarize_one(client: AsyncOpenAI, prompt: str) -> str:
-    """Generate a single summary via the judge model."""
+    """Generate a single summary via the agent model."""
     try:
         resp = await client.chat.completions.create(
-            model=JUDGE_MODEL,
+            model=_agent_config.model,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=200,
         )
@@ -311,12 +328,12 @@ async def _summarize_batch_async(prompts: list[str]) -> list[str]:
     from dotenv import load_dotenv
     load_dotenv()
 
-    api_key = os.environ.get("INF_API_KEY", "")
+    api_key = os.environ.get(_agent_config.api_key_env, "")
     if not api_key:
-        print("ERROR: INF_API_KEY not set in .env")
-        return ["(INF_API_KEY not configured)"] * len(prompts)
+        print(f"ERROR: {_agent_config.api_key_env} not set in .env")
+        return [f"({_agent_config.api_key_env} not configured)"] * len(prompts)
 
-    client = AsyncOpenAI(base_url=JUDGE_BASE_URL, api_key=api_key)
+    client = AsyncOpenAI(base_url=_agent_config.base_url, api_key=api_key)
     return await asyncio.gather(*[_summarize_one(client, p) for p in prompts])
 
 
@@ -367,7 +384,7 @@ async def _fake_user_one(client: AsyncOpenAI, assistant_message: str, conversati
     """Generate a single fake user response."""
     try:
         resp = await client.chat.completions.create(
-            model=JUDGE_MODEL,
+            model=_agent_config.model,
             messages=[
                 {"role": "system", "content": FAKE_USER_SYSTEM_PROMPT},
                 {"role": "user", "content": f"Conversation so far:\n{conversation_context}\n\nAssistant's latest response:\n{assistant_message}\n\nReply as the user:"},
@@ -381,16 +398,16 @@ async def _fake_user_one(client: AsyncOpenAI, assistant_message: str, conversati
 
 
 async def _fake_user_async(assistant_message: str, conversation_context: str) -> str:
-    """Generate a fake user response via DeepSeek API."""
+    """Generate a fake user response via agent API."""
     from dotenv import load_dotenv
     load_dotenv()
 
-    api_key = os.environ.get("INF_API_KEY", "")
+    api_key = os.environ.get(_agent_config.api_key_env, "")
     if not api_key:
-        print("ERROR: INF_API_KEY not set in .env")
+        print(f"ERROR: {_agent_config.api_key_env} not set in .env")
         return ""
 
-    client = AsyncOpenAI(base_url=JUDGE_BASE_URL, api_key=api_key)
+    client = AsyncOpenAI(base_url=_agent_config.base_url, api_key=api_key)
     return await _fake_user_one(client, assistant_message, conversation_context)
 
 

@@ -2,6 +2,12 @@
 max_steps = 200
 prompt = "What is the most promising approach to measuring consciousness in AI systems?"
 
+# What becomes the "accepted truth" routed between rooms:
+#   "raw"      - raw LLM output (skip T5 even if loaded)
+#   "edited"   - T5-edited output (default)
+#   "improved" - judge counterfactual replaces routed messages each cycle
+room_output_source = "edited"
+
 [run.features]
 llm = true
 t5 = true
@@ -46,6 +52,12 @@ use_chat_template = true
 # top_p = 0.9
 # api_base_url = ""              # leave empty for OpenAI, or set for other providers
 # api_key_env = "OPENAI_API_KEY" # env var name holding the API key
+
+[agents]
+model = "QuantTrio/DeepSeek-V3.2-AWQ"
+base_url = "https://api.infinity.inc/v1"
+api_key_env = "INF_API_KEY"
+max_tokens = 1000
 
 [t5]
 device = "cuda:1"

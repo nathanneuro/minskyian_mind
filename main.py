@@ -148,6 +148,7 @@ def main() -> None:
     intervals = run.get("intervals", {})
     llm_cfg = cfg.get("llm", {})
     t5_cfg = cfg.get("t5", {})
+    agents_cfg = cfg.get("agents", {})
 
     model_name = llm_cfg.get("model_name", "Qwen/Qwen3-8B")
     llm_backend = llm_cfg.get("backend", "hf")
@@ -170,6 +171,7 @@ def main() -> None:
     max_steps = run.get("max_steps", 100)
     summarizer_interval = intervals.get("summarizer", 10)
     judge_interval = intervals.get("judge", 1)
+    room_output_source = run.get("room_output_source", "edited")
 
     def on_cycle_end_with_ext(cycle: int, outputs: list[Message]) -> None:
         """Callback at end of step: print + write external outputs to ext log."""
@@ -182,11 +184,22 @@ def main() -> None:
         """Write fake user reply to external log."""
         write_external(f"User: {reply}")
 
+    # Configure agent model (judges, summarizers, fake user)
+    if agents_cfg:
+        from minsky.judges import AgentConfig, configure_agents
+        configure_agents(AgentConfig(
+            model=agents_cfg.get("model", "QuantTrio/DeepSeek-V3.2-AWQ"),
+            base_url=agents_cfg.get("base_url", "https://api.infinity.inc/v1"),
+            api_key_env=agents_cfg.get("api_key_env", "INF_API_KEY"),
+            max_tokens=agents_cfg.get("max_tokens", 1000),
+        ))
+
     # Create the orchestrator
     orchestrator = Orchestrator(
         max_cycles=max_steps,
         summarizer_interval=summarizer_interval,
         judge_interval=judge_interval,
+        room_output_source=room_output_source,
         on_message=print_message,
         on_cycle_start=print_cycle_start,
         on_cycle_end=on_cycle_end_with_ext,
@@ -252,13 +265,22 @@ def main() -> None:
         if use_fake_user:
             orchestrator.use_fake_user = True
 
+        print(f"Room output source: {room_output_source}")
+        if room_output_source == "improved" and not orchestrator.use_judges:
+            print("  WARNING: 'improved' mode requires judges — enabling judges")
+            orchestrator.use_judges = True
         print(f"Summarizers enabled (every {summarizer_interval} steps)")
         if orchestrator.use_judges:
-            print(f"Judges enabled (every {judge_interval} steps)")
+            if room_output_source == "improved":
+                print(f"Judges enabled (every cycle, forced by 'improved' mode)")
+            else:
+                print(f"Judges enabled (every {judge_interval} steps)")
         if orchestrator.use_forecasts:
             print("Sensory forecasts enabled")
         if orchestrator.use_fake_user:
             print("Fake user enabled")
+        if agents_cfg:
+            print(f"Agent model: {agents_cfg.get('model', 'QuantTrio/DeepSeek-V3.2-AWQ')}")
 
     # Run with configured prompt
     prompt = run.get("prompt", "What is the most promising approach to measuring consciousness in AI systems?")
