@@ -17,6 +17,7 @@ _TOOLS_DESC = get_tools_description()
 # ---------------------------------------------------------------------------
 
 SENSORY_PROMPT_TEMPLATE = """The Sensory module receives data and writes concise summaries.
+Between-room messages (TO_PLANNING, TO_MOTOR) must be short (~256 chars).
 
 ---
 INPUT: Perceptions: A cat sat on the mat | Tool results: search returned 3 results about cats
@@ -31,6 +32,7 @@ INPUT: {input_data}
 TO_PLANNING:"""
 
 PLANNING_PROMPT_TEMPLATE = """The Planning module analyzes situations and issues commands.
+Between-room messages (TO_SENSORY, TO_MOTOR) must be short (~256 chars).
 
 ---
 INPUT: User wants to know about climate change impacts on agriculture.
@@ -49,6 +51,7 @@ INPUT: {input_data}
 HYPOTHESES:"""
 
 MOTOR_PROMPT_TEMPLATE = """The Motor module executes commands. It can call tools or send messages to the external user.
+Between-room messages (TO_SENSORY, TO_PLANNING) must be short (~256 chars). TO_EXTERNAL messages are unbounded.
 Available tools: {tools}
 
 ---
@@ -78,7 +81,9 @@ _ARCH_PREAMBLE = """You are part of a Society of Mind cognitive architecture wit
 - Planning: Generates hypotheses, selects plans by expected value, issues commands to Motor.
 - Motor: Executes plans via tools or direct responses, reports results back.
 
-Rooms communicate via short (256-char max) messages. Each room sees only messages addressed to it."""
+Between-room messages (TO_PLANNING, TO_SENSORY, TO_MOTOR) are limited to ~256 characters. Be concise.
+Within-room communication (analysis between partners) is unbounded — think as deeply as needed.
+TO_EXTERNAL messages to the external user are also unbounded."""
 
 SENSORY_CHAT_TEMPLATE = _ARCH_PREAMBLE + """
 
@@ -161,6 +166,7 @@ Current input:
 {input_data}"""
 
 SENSORY_FIRST_PROMPT_TEMPLATE = """The Sensory module's first analyst examines incoming data.
+Within-room analysis is unbounded — think as deeply as needed.
 
 ---
 INPUT: Perceptions: A cat sat on the mat | Tool results: search returned 3 results about cats
@@ -188,6 +194,7 @@ Current input:
 {input_data}""".format(tools=_TOOLS_DESC, input_data="{input_data}", internal_context="{internal_context}")
 
 PLANNING_FIRST_PROMPT_TEMPLATE = """The Planning module's first analyst reasons about the situation.
+Within-room analysis is unbounded — think as deeply as needed.
 
 ---
 INPUT: User wants to know about climate change impacts on agriculture.
@@ -216,6 +223,7 @@ Command from Planning: {command}
 Sensory context: {context}""".format(tools=_TOOLS_DESC, command="{command}", context="{context}", internal_context="{internal_context}")
 
 MOTOR_FIRST_PROMPT_TEMPLATE = """The Motor module's first analyst reasons about command execution.
+Within-room analysis is unbounded — think as deeply as needed.
 Available tools: {tools}
 
 ---
@@ -253,6 +261,7 @@ Current input:
 {input_data}"""
 
 SENSORY_SECOND_PROMPT_TEMPLATE = """The Sensory module produces final output from analysis.
+Between-room messages (TO_PLANNING, TO_MOTOR) must be short (~256 chars).
 
 ---
 ANALYSIS: A cat is present on the mat. Web search found 3 results which should be reviewed.
@@ -290,6 +299,7 @@ Current input:
 {input_data}""".format(tools=_TOOLS_DESC, first_output="{first_output}", input_data="{input_data}")
 
 PLANNING_SECOND_PROMPT_TEMPLATE = """The Planning module produces final output from analysis.
+Between-room messages (TO_SENSORY, TO_MOTOR) must be short (~256 chars).
 
 ---
 ANALYSIS: Two main hypotheses: broad overview or specific crop data. Web search is highest value.
@@ -327,6 +337,7 @@ Command from Planning: {command}
 Sensory context: {context}""".format(tools=_TOOLS_DESC, first_output="{first_output}", command="{command}", context="{context}")
 
 MOTOR_SECOND_PROMPT_TEMPLATE = """The Motor module produces final action from analysis.
+Between-room messages (TO_SENSORY, TO_PLANNING) must be short (~256 chars). TO_EXTERNAL messages are unbounded.
 Available tools: {tools}
 
 ---

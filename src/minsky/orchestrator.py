@@ -481,7 +481,7 @@ class Orchestrator:
 
         user_reply = fake_user_respond(assistant_text, conversation_context)
         if user_reply:
-            print(f"  FAKE USER: {user_reply[:150]}")
+            print(f"  FAKE USER: {user_reply}")
             if self.on_fake_user:
                 self.on_fake_user(user_reply)
             self.inject_message(Message(

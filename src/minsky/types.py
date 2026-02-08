@@ -49,8 +49,8 @@ def truncate_message(content: str, max_length: int = MESSAGE_MAX_LENGTH) -> str:
 class Message:
     """A message passed between rooms in the Society of Mind.
 
-    Content is limited to MESSAGE_MAX_LENGTH characters (~256 chars ≈ 64 tokens).
-    Each room outputs one message per target per global step.
+    Between-room messages are limited to MESSAGE_MAX_LENGTH characters.
+    External messages, tool calls, and tool outputs are NOT truncated.
     """
 
     content: str
@@ -61,12 +61,21 @@ class Message:
     timestamp: datetime = field(default_factory=datetime.now)
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    _EXEMPT_TYPES = frozenset({
+        MessageType.TOOL_OUTPUT,
+        MessageType.TOOL_CALL,
+    })
+
     def __post_init__(self):
-        """Enforce message length limit."""
+        """Enforce message length limit on between-room messages only."""
+        if (self.source == RoomType.EXTERNAL
+                or self.target == RoomType.EXTERNAL
+                or self.message_type in self._EXEMPT_TYPES):
+            return
         self.content = truncate_message(self.content)
 
     def __str__(self) -> str:
-        return f"[{self.source.value} -> {self.target.value}] ({self.message_type.value}): {self.content[:100]}"
+        return f"[{self.source.value} -> {self.target.value}] ({self.message_type.value}): {self.content}"
 
 
 @dataclass

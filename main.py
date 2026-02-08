@@ -112,20 +112,20 @@ def print_cycle_end(cycle: int, outputs: list[Message]) -> None:
     if outputs:
         print(f"\n  → External outputs: {len(outputs)}")
         for out in outputs:
-            print(f"    OUTPUT: {out.content[:200]}")
+            print(f"    OUTPUT: {out.content}")
 
 
 def print_summarize(room: str, summary: str) -> None:
     """Callback when a room is summarized."""
-    print(f"\n  📝 SUMMARY [{room}]: {summary[:150]}...")
+    print(f"\n  📝 SUMMARY [{room}]: {summary}")
 
 
 def print_judge(judge_output) -> None:
     """Callback when a judge evaluates a room output."""
     print(f"\n  ⚖️  JUDGE [{judge_output.room_type.value}]: score={judge_output.score:.2f}")
-    print(f"      Reasoning: {judge_output.reasoning[:100]}")
+    print(f"      Reasoning: {judge_output.reasoning}")
     if judge_output.counterfactual != judge_output.original:
-        print(f"      Counterfactual: {judge_output.counterfactual[:100]}...")
+        print(f"      Counterfactual: {judge_output.counterfactual}")
 
 
 def main() -> None:
@@ -276,9 +276,9 @@ def main() -> None:
         print("=" * 60)
         for i, pair in enumerate(pairs[:5]):  # Show first 5
             print(f"\n[{i+1}] {pair.task_prefix} (score={pair.score:.2f})")
-            print(f"    Raw:      {pair.raw[:80]}...")
-            print(f"    T5:       {pair.t5_edited[:80]}...")
-            print(f"    Improved: {pair.improved[:80]}...")
+            print(f"    Raw:      {pair.raw}")
+            print(f"    T5:       {pair.t5_edited}")
+            print(f"    Improved: {pair.improved}")
         if len(pairs) > 5:
             print(f"\n    ... and {len(pairs) - 5} more pairs")
 
