@@ -33,17 +33,23 @@ from minsky.prompts.rooms import (
 )
 
 
-def apply_edit(raw_llm_output: str, edit_fn, context: str = "") -> str:
+def apply_edit(raw_llm_output: str, edit_fn, context: str = "", task_prefix: str = "edit") -> str:
     """Pass RWKV output through T5 edit model.
 
     RWKV output should NEVER reach rooms directly. T5 is the gate.
     If edit_fn is None (--no-t5 mode), raw output passes through.
     If edit_fn raises, logs error and returns raw output as last resort.
+
+    Args:
+        raw_llm_output: Raw text from RWKV.
+        edit_fn: T5 edit function (text, context, task_prefix) -> str.
+        context: Short description of input context.
+        task_prefix: Room-specific prefix (edit_sensory, edit_planning, edit_motor).
     """
     if edit_fn is None:
         return raw_llm_output
     try:
-        edited = edit_fn(raw_llm_output, context)
+        edited = edit_fn(raw_llm_output, context, task_prefix)
         if edited and edited.strip():
             return edited
         print(f"WARNING: T5 returned empty output for context='{context}', using raw RWKV")
@@ -107,7 +113,7 @@ def sensory_process(
         prompt = SENSORY_PROMPT_TEMPLATE.format(input_data=combined)
         raw = llm_fn(prompt)
         response = "TO_PLANNING:" + raw  # Prepend since prompt ends at TO_PLANNING:
-        response = apply_edit(response, edit_fn, context=f"sensory: {combined[:60]}")
+        response = apply_edit(response, edit_fn, context=combined[:80], task_prefix="edit_sensory")
 
         planning_match = re.search(r'TO_PLANNING:\s*(.+?)(?=TO_MOTOR:|$)', response, re.IGNORECASE | re.DOTALL)
         motor_match = re.search(r'TO_MOTOR:\s*(.+?)$', response, re.IGNORECASE | re.DOTALL)
@@ -178,7 +184,7 @@ def planning_process(
         prompt = PLANNING_PROMPT_TEMPLATE.format(input_data=input_data)
         raw = llm_fn(prompt)
         response = "HYPOTHESES:" + raw  # Prepend since prompt ends at HYPOTHESES:
-        response = apply_edit(response, edit_fn, context=f"planning: {sensory_data[:60]}")
+        response = apply_edit(response, edit_fn, context=sensory_data[:80], task_prefix="edit_planning")
         state.metadata["last_planning_response"] = response
 
         sensory_match = re.search(r'TO_SENSORY:\s*(.+?)(?=TO_MOTOR:|$)', response, re.IGNORECASE | re.DOTALL)
@@ -297,7 +303,7 @@ def motor_process(
             )
             raw = llm_fn(prompt)
             output = "ACTION:" + raw  # Prepend since prompt ends at ACTION:
-            output = apply_edit(output, edit_fn, context=f"motor cmd: {command[:50]}")
+            output = apply_edit(output, edit_fn, context=command[:80], task_prefix="edit_motor")
 
             action_type, tool_args, response = parse_motor_output(output)
 

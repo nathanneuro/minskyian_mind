@@ -109,14 +109,14 @@ class T5EditWrapper:
         self._initialized = True
         print(f"T5 edit model loaded on {device} (dtype={dtype})")
 
-    def __call__(self, text: str, context: str = "") -> str:
+    def __call__(self, text: str, context: str = "", task_prefix: str = "edit") -> str:
         """Edit text with context (edit_fn interface)."""
         if not self._initialized:
             self.initialize()
 
         import torch
 
-        prompt = format_t5_prompt(text, context)
+        prompt = format_t5_prompt(text, context, task_prefix)
 
         # Tokenize
         inputs = self.processor(

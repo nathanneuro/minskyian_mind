@@ -17,7 +17,7 @@ from minsky.prompts.judges import (
 )
 from minsky.prompts.forecast import FORECAST_PROMPT_TEMPLATE
 from minsky.prompts.summarizer import SUMMARIZER_PROMPT_TEMPLATE
-from minsky.prompts.t5 import format_t5_prompt
+from minsky.prompts.t5 import format_t5_prompt, T5_INSTRUCTIONS
 
 __all__ = [
     # Room prompts
@@ -36,4 +36,5 @@ __all__ = [
     "SUMMARIZER_PROMPT_TEMPLATE",
     # T5
     "format_t5_prompt",
+    "T5_INSTRUCTIONS",
 ]
