@@ -89,11 +89,17 @@ class Message:
 
 @dataclass
 class InternalMessage:
-    """In-room message between left and right agents. NOT truncated."""
+    """In-room message between left and right agents.
+
+    Truncated to MESSAGE_MAX_LENGTH, same limit as between-room messages.
+    """
     content: str
     agent: str  # "left" or "right"
     room_type: RoomType
     cycle: int = 0
+
+    def __post_init__(self):
+        self.content = truncate_message(self.content)
 
 
 @dataclass

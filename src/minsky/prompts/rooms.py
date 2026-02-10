@@ -81,9 +81,8 @@ _ARCH_PREAMBLE = """You are part of a Society of Mind cognitive architecture wit
 - Planning: Generates hypotheses, selects plans by expected value, issues commands to Motor.
 - Motor: Executes plans via tools or direct responses, reports results back.
 
-Between-room messages (TO_PLANNING, TO_SENSORY, TO_MOTOR) are limited to ~256 characters. Be concise.
-Within-room communication (analysis between partners) is unbounded — think as deeply as needed.
-TO_EXTERNAL messages to the external user are also unbounded."""
+All messages between rooms and between left/right partners within a room are limited to ~256 characters. Be concise.
+TO_EXTERNAL messages to the external user are unbounded."""
 
 SENSORY_CHAT_TEMPLATE = _ARCH_PREAMBLE + """
 
@@ -154,19 +153,19 @@ Sensory context: {context}""".format(tools=_TOOLS_DESC, command="{command}", con
 
 SENSORY_FIRST_CHAT_TEMPLATE = _ARCH_PREAMBLE + """
 
-You are the **Sensory** module (first analyst). You receive raw perceptions, tool outputs, and attention requests.
+You are the **Sensory** module (left/right analyst). You receive raw perceptions, tool outputs, and attention requests.
 
-Analyze the incoming data thoroughly. Identify key details, patterns, and anything noteworthy. Your partner will read your analysis and produce the final structured output.
+Analyze the incoming data. Identify key details, patterns, and anything noteworthy. Your partner will read your analysis and produce the final structured output.
 
-Write freely — no format constraints. Focus on accurate, thorough observation.
+Your output will be truncated to ~256 characters before your partner sees it. Be concise and prioritize the most important observations.
 
 {internal_context}
 
 Current input:
 {input_data}"""
 
-SENSORY_FIRST_PROMPT_TEMPLATE = """The Sensory module's first analyst examines incoming data.
-Within-room analysis is unbounded — think as deeply as needed.
+SENSORY_FIRST_PROMPT_TEMPLATE = """The Sensory module's left/right analyst examines incoming data.
+Within-room messages are limited to ~256 characters. Be concise.
 
 ---
 INPUT: Perceptions: A cat sat on the mat | Tool results: search returned 3 results about cats
@@ -178,7 +177,7 @@ ANALYSIS:"""
 
 PLANNING_FIRST_CHAT_TEMPLATE = _ARCH_PREAMBLE + """
 
-You are the **Planning** module (first analyst). You analyze situations and reason about the best course of action.
+You are the **Planning** module (left/right analyst). You analyze situations and reason about the best course of action.
 
 Motor has access to these tools:
 {tools}
@@ -186,15 +185,15 @@ Motor can also send messages to the external user via TO_EXTERNAL.
 
 Think through the situation. Generate hypotheses and reason about the best action. Your partner will formalize your reasoning into structured output.
 
-Write freely — no format constraints. Focus on deep reasoning.
+Your output will be truncated to ~256 characters before your partner sees it. Be concise and prioritize key reasoning.
 
 {internal_context}
 
 Current input:
 {input_data}""".format(tools=_TOOLS_DESC, input_data="{input_data}", internal_context="{internal_context}")
 
-PLANNING_FIRST_PROMPT_TEMPLATE = """The Planning module's first analyst reasons about the situation.
-Within-room analysis is unbounded — think as deeply as needed.
+PLANNING_FIRST_PROMPT_TEMPLATE = """The Planning module's left/right analyst reasons about the situation.
+Within-room messages are limited to ~256 characters. Be concise.
 
 ---
 INPUT: User wants to know about climate change impacts on agriculture.
@@ -206,7 +205,7 @@ ANALYSIS:"""
 
 MOTOR_FIRST_CHAT_TEMPLATE = _ARCH_PREAMBLE + """
 
-You are the **Motor** module (first analyst). You reason about how to execute commands.
+You are the **Motor** module (left/right analyst). You reason about how to execute commands.
 
 Available tools:
 {tools}
@@ -215,15 +214,15 @@ TO_EXTERNAL sends a message to the external user (outside the system).
 
 Reason about how to execute this command. Consider which tool to use and why. Your partner will produce the final action.
 
-Write freely — no format constraints. Focus on execution reasoning.
+Your output will be truncated to ~256 characters before your partner sees it. Be concise and prioritize key execution reasoning.
 
 {internal_context}
 
 Command from Planning: {command}
 Sensory context: {context}""".format(tools=_TOOLS_DESC, command="{command}", context="{context}", internal_context="{internal_context}")
 
-MOTOR_FIRST_PROMPT_TEMPLATE = """The Motor module's first analyst reasons about command execution.
-Within-room analysis is unbounded — think as deeply as needed.
+MOTOR_FIRST_PROMPT_TEMPLATE = """The Motor module's left/right analyst reasons about command execution.
+Within-room messages are limited to ~256 characters. Be concise.
 Available tools: {tools}
 
 ---

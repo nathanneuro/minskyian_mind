@@ -381,8 +381,8 @@ class TestDualAgents:
         assert len(new_state.internal_history) == 2
         assert len(outgoing) == 2
 
-    def test_internal_messages_not_truncated(self):
-        """InternalMessage content should NOT be truncated (unlike between-room Message)."""
+    def test_internal_messages_truncated(self):
+        """InternalMessage content should be truncated to MESSAGE_MAX_LENGTH (same as between-room)."""
         long_content = "x" * 500
         msg = InternalMessage(
             content=long_content,
@@ -390,8 +390,8 @@ class TestDualAgents:
             room_type=RoomType.SENSORY,
             cycle=1,
         )
-        assert len(msg.content) == 500
-        assert msg.content == long_content
+        assert len(msg.content) == MESSAGE_MAX_LENGTH
+        assert msg.content.endswith("...")
 
     def test_internal_history_sliding_window(self):
         """RoomState.add_internal should keep at most 20 entries."""

@@ -16,8 +16,9 @@ Prompt selection is based on llm_fn.use_chat_template:
 
 Dual-agent mode: when llm_fn is active, each room runs two agents
 ("left" and "right") that converse before producing between-room output.
-The first agent analyzes freely; the second produces structured output.
-Order is randomized each cycle.
+The first agent analyzes; the second produces structured output.
+Messages between left and right are truncated to MESSAGE_MAX_LENGTH,
+the same limit as between-room messages. Order is randomized each cycle.
 """
 
 import random
@@ -91,7 +92,7 @@ def _build_internal_context(state: RoomState) -> str:
     recent = state.internal_history[-6:]
     if not recent:
         return ""
-    lines = [f"[{m.agent}] {m.content[:200]}" for m in recent]
+    lines = [f"[{m.agent}] {truncate_message(m.content)}" for m in recent]
     return "Recent in-room exchanges:\n" + "\n".join(lines)
 
 
@@ -131,8 +132,12 @@ def run_dual_agents(
         )
     first_raw = llm_fn(first_prompt)
 
+    # Truncate first agent's output before passing to second agent
+    # (same limit as between-room messages)
+    first_truncated = truncate_message(first_raw)
+
     state.add_internal(InternalMessage(
-        content=first_raw,
+        content=first_truncated,
         agent=first_side,
         room_type=state.room_type,
         cycle=cycle,
@@ -141,11 +146,11 @@ def run_dual_agents(
     # --- Second agent: structured output ---
     if is_chat:
         second_prompt = second_chat_template.format(
-            first_output=first_raw, input_data=input_data, **fmt
+            first_output=first_truncated, input_data=input_data, **fmt
         )
     else:
         second_prompt = second_prompt_template.format(
-            first_output=first_raw, input_data=input_data, **fmt
+            first_output=first_truncated, input_data=input_data, **fmt
         )
     second_raw = llm_fn(second_prompt)
 
